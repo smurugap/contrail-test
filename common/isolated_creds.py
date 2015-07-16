@@ -37,16 +37,13 @@ class IsolatedCreds(fixtures.Fixture):
     def setUp(self):
         super(IsolatedCreds, self).setUp()
         self.connections= ContrailConnections(self.inputs, self.logger)
-        self.vnc_lib= self.connections.vnc_lib
-        self.auth = self.connections.auth
+        self.auth = self.connections.get_auth_h()
 
     def create_tenant(self): 
-
         self.project = None
-        time.sleep(4)        
         try:
-            self.project = project_test.ProjectFixture(project_name = self.project_name, auth=self.auth,
-					vnc_lib_h= self.vnc_lib,username= self.user,password= self.password,
+            self.project = project_test.ProjectFixture(project_name = self.project_name,
+					username= self.user, password= self.password,
                                         connections= self.connections)
             self.project.setUp()
         except Exception as e:
@@ -85,49 +82,46 @@ class IsolatedCreds(fixtures.Fixture):
                             project_fq_name=['default-domain',self.project_name],logger = self.logger))
         return self.project_inputs
 
-    def get_conections(self): 
-            
+    def get_conections(self):
         self.project_connections= ContrailConnections(self.project_inputs,
                                     project_name= self.project_name,
-				                    username=self.project.username
-                                    ,password= self.project.password,
+				    username=self.project.username,
+                                    password= self.project.password,
                                     logger = self.logger)
+        self.project_connections.get_all_handles()
         return self.project_connections
 
     def get_admin_inputs(self):
-
-        admin = AdminCreds(ADMIN_TENANT , self.inputs , self.ini_file , self.logger)
-        return admin.get_inputs()		
+        admin = AdminCreds(self.inputs, self.ini_file, self.logger)
+        return admin.get_inputs()
 
     def get_admin_connections(self):
-
-        admin = AdminCreds(ADMIN_TENANT , self.inputs , self.ini_file , self.logger)
+        admin = AdminCreds(self.inputs, self.ini_file, self.logger)
         return admin.get_conections()	
-	
+
     def cleanUp(self):
         super(IsolatedCreds, self).cleanUp()
 
 class AdminCreds(fixtures.Fixture):
 
-    def __init__(self,project_name,inputs,ini_file = None ,logger = None):
-
-        self.project_name = project_name
-        self.user = project_name 
-        self.password = project_name
+    def __init__(self,inputs,ini_file = None ,logger = None):
+        self.project_name = self.inputs.stack_tenant # ADMIN_TENANT
+        self.user = self.project_name
+        self.password = self.project_name
         self.inputs = inputs
         self.ini_file = ini_file
         self.logger = logger
 
     def get_inputs(self):
-
         return self.inputs
  
     def get_conections(self): 
-            
-        connections= ContrailConnections(self.inputs,project_name= self.project_name,
-				   username=self.inputs.stack_user
-                                  ,password= self.inputs.stack_password,
+        connections= ContrailConnections(self.inputs,
+                                   project_name= self.project_name,
+				   username=self.inputs.stack_user,
+                                   password= self.inputs.stack_password,
                                    logger = self.logger)
+        connections.get_all_handles()
         return connections
     
     def cleanUp(self):

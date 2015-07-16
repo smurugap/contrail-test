@@ -1,51 +1,42 @@
 import fixtures
-
-from vnc_api.vnc_api import NoIdError
-from vnc_api.gen.cfixture import ContrailFixture
-from vnc_api.gen.resource_xsd import PolicyEntriesType
-from vnc_api.gen.resource_test import SecurityGroupTestFixtureGen,\
-    ProjectTestFixtureGen, DomainTestFixtureGen
-
+from vnc_api.vnc_api import *
 from tcutils.util import retry
+
 try:
     from webui_test import *
 except ImportError:
     pass
 
-class SecurityGroupFixture(ContrailFixture):
+class SecurityGroupFixture(fixtures.Fixture):
 
-    def __init__(
-        self, inputs, connections, domain_name, project_name, secgrp_name,
-	    secgrp_id=None, secgrp_entries=None,option='neutron'):
-	#option <'neutron' or 'contrail'>	
-        self.logger = inputs.logger
-        self.vnc_lib_h = connections.vnc_lib
-        self.api_s_inspect = connections.api_server_inspect
-        self.inputs = inputs
-        self.domain_name = domain_name
-        self.project_name = project_name
+    def __init__(self, connections, secgrp_name,
+	         secgrp_id=None, secgrp_entries=None, option='neutron'):
+	#option <'neutron' or 'contrail'>
+        self.connections = connections
+        self.inputs = self.connections.inputs
+        self.logger = self.inputs.logger
+        self.domain_name = self.inputs.domain_name
+        self.project_name = self.inputs.project_name
         self.secgrp_name = secgrp_name
         self.secgrp_id = secgrp_id
+        self.secgrp_rules = secgrp_entries
         self.secgrp_entries = PolicyEntriesType(secgrp_entries)
         self.already_present = False
         self.domain_fq_name = [self.domain_name]
         self.project_fq_name = [self.domain_name, self.project_name]
         self.secgrp_fq_name = [self.domain_name,
                                self.project_name, self.secgrp_name]
-        self.connections = connections
-        self.cn_inspect = self.connections.cn_inspect
-        self.quantum_h = self.connections.quantum_h
-        self.secgrp_rules = secgrp_entries
         self.secgrp_rule_q = []
         self.option = option
         if self.inputs.verify_thru_gui():
             self.webui = WebuiTest(self.connections, self.inputs)
+        if self.option == 'neutron':
+            self.quantum_h = self.connections.get_network_h()
+        self.vnc = self.connections.get_vnc_lib_h().get_handle()
 
     def setUp(self):
         self.logger.debug("Creating Security group: %s", self.secgrp_fq_name)
         super(SecurityGroupFixture, self).setUp()
-        project = ProjectTestFixtureGen(self.vnc_lib_h, self.project_name)
-        project.setUp()
         sec_grp_check = self.sec_grp_exist()
         if sec_grp_check:
             self.already_present = True
@@ -66,15 +57,19 @@ class SecurityGroupFixture(ContrailFixture):
             elif self.inputs.is_gui_based_config():
                 self.webui.create_security_group(self)
             else:
-                self.secgrp_fix = self.useFixture(
-                    SecurityGroupTestFixtureGen(conn_drv=self.vnc_lib_h,
-                                            security_group_name=self.secgrp_name,
-                                            parent_fixt=project,
-                                            security_group_id=self.secgrp_id,
-                                            security_group_entries=self.secgrp_entries))
-                self.secgrp_id = self.secgrp_fix._obj.uuid
+                obj = SecurityGroup(name=self.secgrp_name,
+                                    parent_type='project',
+                                    fq_name=self.secgrp_fq_name,
+                                    security_group_id=self.secgrp_id,
+                                    security_group_entries=self.secgrp_entries)
+                self.vnc.security_group_create(obj)
+                self.obj = self.vnc.security_group_read(id=obj.uuid)
+                self.secgrp_id = self.obj.uuid
             self.logger.info("Created security-group name:%s" %
                              self.secgrp_name)
+
+    def get_uuid(self):
+        return self.secgrp_id
 
     def delete_default_egress_rule(self, sg_id):
         #currently this method can be only used before adding any custom rule to sg
@@ -179,6 +174,10 @@ class SecurityGroupFixture(ContrailFixture):
             return True
 
     def cleanUp(self):
+        super(SecurityGroupFixture, self).cleanUp()
+        self.delete()
+
+    def delete(self):
         self.logger.debug("Deleting Security group: %s", self.secgrp_fq_name)
         do_cleanup = True
         if self.inputs.fixture_cleanup == 'no':
@@ -193,7 +192,7 @@ class SecurityGroupFixture(ContrailFixture):
             elif self.inputs.is_gui_based_config():
                 self.webui.delete_security_group(self)
             else:
-                self.secgrp_fix.cleanUp()
+                self.vnc.security_group_delete(id=self.secgrp_id)
             result, msg = self.verify_on_cleanup()
             assert result, msg
         else:
@@ -223,41 +222,44 @@ class SecurityGroupFixture(ContrailFixture):
                 self.secgrp_rules = rules
         else:
             secgrp_entries = PolicyEntriesType(rules)
-            self.secgrp_fix._obj.set_security_group_entries(secgrp_entries)
-            self.vnc_lib_h.security_group_update(self.secgrp_fix._obj)
+            self.obj.set_security_group_entries(secgrp_entries)
+            self.vnc.security_group_update(self.obj)
 
     @retry(delay=2, tries=5)
     def verify_secgrp_in_api_server(self):
         """Validate security group information in API-Server."""
 	#verify if sg present in api
-        self.api_s_secgrp_obj = self.api_s_inspect.get_cs_secgrp(
-            domain=self.domain_name, project=self.project_name,
-            secgrp=self.secgrp_name, refresh=True)
-        if not self.api_s_secgrp_obj:
-            errmsg = "Security group %s not found in the API Server" % self.secgrp_name
-            self.logger.warn(errmsg)
-            return False, errmsg
-        else:
-            self.logger.info(
-                "Security group %s found in the API Server", self.secgrp_name)
+        api_server_inspect_handles = self.connections.get_api_server_inspect_handles()
+        for api_s_inspect in api_server_inspect_handles.values():
+            self.api_s_secgrp_obj = api_s_inspect.get_cs_secgrp(
+                                    domain=self.domain_name,
+                                    project=self.project_name,
+                                    secgrp=self.secgrp_name, refresh=True)
+            if not self.api_s_secgrp_obj:
+                errmsg = "Security group %s not found in the API Server" % self.secgrp_name
+                self.logger.warn(errmsg)
+                return False, errmsg
+            else:
+                self.logger.info(
+                    "Security group %s found in the API Server", self.secgrp_name)
 
-	#verify if sg acls present in api
-        self.api_s_acls = self.api_s_inspect.get_secgrp_acls_href(
-            domain=self.domain_name, project=self.project_name,
-            secgrp=self.secgrp_name, refresh=True)
-        if not self.api_s_acls:
-            errmsg = "ACLs for Security group %s not found in the API Server" % self.secgrp_name
-            self.logger.warn(errmsg)
-            return False, errmsg
-        else:
-            self.logger.info(
-                "ACLs for Security group %s found in the API Server", self.secgrp_name)
+	    #verify if sg acls present in api
+            self.api_s_acls = api_s_inspect.get_secgrp_acls_href(
+                domain=self.domain_name, project=self.project_name,
+                secgrp=self.secgrp_name, refresh=True)
+            if not self.api_s_acls:
+                errmsg = "ACLs for Security group %s not found in the API Server" % self.secgrp_name
+                self.logger.warn(errmsg)
+                return False, errmsg
+            else:
+                self.logger.info(
+                    "ACLs for Security group %s found in the API Server", self.secgrp_name)
 
         return True, None
 
     def verify_on_setup(self):
         try:
-            secgrp = self.vnc_lib_h.security_group_read(
+            secgrp = self.vnc.security_group_read(
                 fq_name=self.secgrp_fq_name)
             self.logger.debug(
                 "Security group: %s created succesfully", self.secgrp_fq_name)
@@ -280,36 +282,37 @@ class SecurityGroupFixture(ContrailFixture):
     def verify_secgrp_not_in_api_server(self):
         """Validate security group information in API-Server."""
 	#verify if sg is removed from api
-        self.api_s_secgrp_obj = self.api_s_inspect.get_cs_secgrp(
-            domain=self.domain_name, project=self.project_name,
-            secgrp=self.secgrp_name, refresh=True)
-        if self.api_s_secgrp_obj:
-            errmsg = "Security group %s still found in the API Server" % self.secgrp_name
-            self.logger.warn(errmsg)
-            return False, errmsg
-        else:
-            self.logger.info(
-                "Security group %s removed from the API Server", self.secgrp_name)
+        api_server_inspect_handles = self.connections.get_api_server_inspect_handles()
+        for api_s_inspect in api_server_inspect_handles.values():
+            self.api_s_secgrp_obj = api_s_inspect.get_cs_secgrp(
+                                    domain=self.domain_name,
+                                    project=self.project_name,
+                                    secgrp=self.secgrp_name, refresh=True)
+            if self.api_s_secgrp_obj:
+                errmsg = "Security group %s still found in the API Server" % self.secgrp_name
+                self.logger.warn(errmsg)
+                return False, errmsg
+            else:
+                self.logger.info(
+                    "Security group %s removed from the API Server", self.secgrp_name)
 
-	#verify if sg acls removed from api
-        self.api_s_acls = self.api_s_inspect.get_secgrp_acls_href(
-            domain=self.domain_name, project=self.project_name,
-            secgrp=self.secgrp_name, refresh=True)
-        if self.api_s_acls:
-            errmsg = "ACLs for Security group %s still found in the API Server" % self.secgrp_name
-            self.logger.warn(errmsg)
-            self.logger.debug("ACLs found for SG %s are: %s" %(self.secgrp_name, self.api_s_acls))
-            return False, errmsg
-        else:
-            self.logger.info(
-                "ACLs for Security group %s removed from the API Server", self.secgrp_name)
-
+	    #verify if sg acls removed from api
+            self.api_s_acls = api_s_inspect.get_secgrp_acls_href(
+                              domain=self.domain_name, project=self.project_name,
+                              secgrp=self.secgrp_name, refresh=True)
+            if self.api_s_acls:
+                errmsg = "ACLs for Security group %s still found in the API Server" % self.secgrp_name
+                self.logger.warn(errmsg)
+                self.logger.debug("ACLs found for SG %s are: %s" %(self.secgrp_name, self.api_s_acls))
+                return False, errmsg
+            else:
+                self.logger.info(
+                    "ACLs for Security group %s removed from the API Server", self.secgrp_name)
         return True, None
 
     def verify_on_cleanup(self):
         try:
-            secgroup = self.vnc_lib_h.security_group_read(
-                fq_name=self.secgrp_fq_name)
+            secgroup = self.vnc.security_group_read(fq_name=self.secgrp_fq_name)
             errmsg = "Security group: %s still not removed" % self.secgrp_fq_name
             self.logger.warn(errmsg)
             return False, errmsg
@@ -329,8 +332,7 @@ class SecurityGroupFixture(ContrailFixture):
 
     def sec_grp_exist(self):
         try:
-            secgroup = self.vnc_lib_h.security_group_read(
-                fq_name=self.secgrp_fq_name)
+            secgroup = self.vnc.security_group_read(fq_name=self.secgrp_fq_name)
             self.secgrp_id = secgroup.uuid
         except NoIdError:
             return False
@@ -342,7 +344,8 @@ class SecurityGroupFixture(ContrailFixture):
 
         for cn in self.inputs.bgp_ips:
 	    #verify if sg present in control nodes
-            cn_secgrp_obj = self.cn_inspect[cn].get_cn_sec_grp(
+            cn_inspect = self.connections.get_control_node_inspect_handle(cn)
+            cn_secgrp_obj = cn_inspect.get_cn_sec_grp(
 		domain=self.domain_name,
                 project=self.project_name,
                 secgrp=self.secgrp_name)
@@ -356,7 +359,7 @@ class SecurityGroupFixture(ContrailFixture):
                     "Security group %s found in the control node %s" % (self.secgrp_name, cn))
 
 	    #verify if sg acls present in control nodes
-            cn_secgrp_obj = self.cn_inspect[cn].get_cn_sec_grp_acls(
+            cn_secgrp_obj = cn_inspect.get_cn_sec_grp_acls(
                 domain=self.domain_name,
                 project=self.project_name,
                 secgrp=self.secgrp_name)
@@ -378,7 +381,8 @@ class SecurityGroupFixture(ContrailFixture):
         """Validate security group not present in control nodes."""
         #verify if sg present in control nodes
         for cn in self.inputs.bgp_ips:
-            cn_secgrp_obj = self.cn_inspect[cn].get_cn_sec_grp(
+            cn_inspect = self.connections.get_control_node_inspect_handle(cn)
+            cn_secgrp_obj = cn_inspect.get_cn_sec_grp(
                 domain=self.domain_name,
                 project=self.project_name,
                 secgrp=self.secgrp_name)
@@ -393,7 +397,7 @@ class SecurityGroupFixture(ContrailFixture):
                         (self.secgrp_name, cn))
 
             #verify if sg acls removed from control nodes
-            cn_secgrp_obj = self.cn_inspect[cn].get_cn_sec_grp_acls(
+            cn_secgrp_obj = cn_inspect.get_cn_sec_grp_acls(
                 domain=self.domain_name,
                 project=self.project_name,
                 secgrp=self.secgrp_name)
@@ -410,9 +414,9 @@ class SecurityGroupFixture(ContrailFixture):
 
 def get_secgrp_id_from_name(connections,secgrp_fq_name):
     fq_name_list = secgrp_fq_name.split(':')
+    vnc = connections.get_vnc_lib_h().get_handle()
     try:
-        secgroup = connections.vnc_lib.security_group_read(
-            fq_name=fq_name_list)
+        secgroup = vnc.security_group_read(fq_name=fq_name_list)
         secgrp_id = secgroup.uuid
     except NoIdError:
         return False
@@ -424,6 +428,7 @@ def list_sg_rules(connections,sg_id):
     return sg_info['security_group']['security_group_rules'] 
 
 def show_secgrp(connections,sg_id):
-    sg_info = connections.quantum_h.show_security_group(sg_id)
+    neutron = connections.get_network_h()
+    sg_info = neutron.show_security_group(sg_id)
 
     return sg_info 

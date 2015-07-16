@@ -558,3 +558,5 @@ class VcenterAuth(OrchestratorAuth):
            return obj.get_uuid()
        return None
 
+   def get_handle(self):
+       return self

@@ -32,8 +32,7 @@ class SharedNetExternalRouter():
         self.logger.info(
                 'Default SG to be edited for allow all on project: %s' %
                 self.inputs.project_name)
-        self.project_fixture.set_sec_group_for_allow_all(
-                self.inputs.project_name, 'default')
+        self.project_fixture.set_sec_group_for_allow_all()
 
         self.demo_proj_inputs = self.useFixture(ProjectFixture(
             vnc_lib_h=self.vnc_lib, project_name = 'demo', username=self.inputs.stack_user, password=self.inputs.stack_password, connections=self.connections))

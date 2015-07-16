@@ -3,7 +3,6 @@ from tcutils.config.vnc_introspect_utils import *
 from tcutils.control.cn_introspect_utils import *
 from tcutils.agent.vna_introspect_utils import *
 from tcutils.collector.opserver_introspect_utils import *
-from fixtures import Fixture
 from tcutils.collector.analytics_tests import *
 from vnc_api.vnc_api import *
 from tcutils.vdns.dns_introspect_utils import DnsAgentInspect
@@ -19,50 +18,24 @@ except ImportError:
     pass
 
 class ContrailConnections():
-    def __init__(self, inputs,logger,
+    def __init__(self, inputs, logger,
                  project_name=None,
                  username=None,
                  password=None):
         self.inputs = inputs
         project_name = project_name or self.inputs.project_name
-        username = username or self.inputs.stack_user
-        password = password or self.inputs.stack_password
-        self.username = username
-        self.password = password
+        self.username = username or self.inputs.stack_user
+        self.password = password or self.inputs.stack_password
         self.project_name = project_name
-
-        self.vnc_lib_fixture = VncLibFixture(
-            username=username, password=password,
-            domain=self.inputs.domain_name, project=project_name,
-            inputs=self.inputs, cfgm_ip=self.inputs.cfgm_ip,
-            api_port=self.inputs.api_server_port)
-        self.vnc_lib_fixture.setUp()
-        self.vnc_lib = self.vnc_lib_fixture.get_handle()
+        self.logger = logger
 
         self.nova_h = None
         self.quantum_h = None
         if self.inputs.orchestrator == 'openstack':
-            self.auth = OpenstackAuth(username, password, project_name, self.inputs, logger)
-            self.project_id = self.auth.get_project_id(self.inputs.domain_name, project_name)
-
             if self.inputs.verify_thru_gui():
-                self.ui_login = UILogin(self, self.inputs, project_name, username, password)
+                self.ui_login = UILogin(self, self.inputs, self.project_name, self.username, self.password)
                 self.browser = self.ui_login.browser
                 self.browser_openstack = self.ui_login.browser_openstack
-
-            self.orch = OpenstackOrchestrator(username=username, password=password,
-                           project_id=self.project_id, project_name=project_name,
-                           inputs=inputs, vnclib=self.vnc_lib, logger=logger)
-            self.nova_h = self.orch.nova_h
-            self.quantum_h = self.orch.quantum_h
-        else: # vcenter
-            self.auth = VcenterAuth(username, password, project_name, self.inputs)
-            self.orch = VcenterOrchestrator(user=username, pwd=password,
-                           host=self.inputs.auth_ip,
-                           port=self.inputs.auth_port,
-                           dc_name=self.inputs.vcenter_dc,
-                           vnc=self.vnc_lib,
-                           inputs=self.inputs, logger=logger)
 
         self.api_server_inspects = {}
         self.dnsagent_inspect = {}
@@ -70,8 +43,160 @@ class ContrailConnections():
         self.agent_inspect = {}
         self.ops_inspects = {}
         self.ds_inspect = {}
-        self.update_inspect_handles()
         # end __init__
+
+    def get_all_handles(self):
+        self.get_vnc_lib_h()
+        self.get_auth_h()
+        self.get_orch_h()
+        self.get_inspect_handles()
+
+    def get_vnc_lib_h(self):
+        if not getattr(self, 'vnc_lib', None):
+            self.vnc_lib_fixture = VncLibHelper(
+                username=self.username, password=self.password,
+                domain=self.inputs.domain_name, project=self.project_name,
+                inputs=self.inputs, cfgm_ip=self.inputs.cfgm_ip,
+                api_port=self.inputs.api_server_port)
+            self.vnc_lib = self.vnc_lib_fixture.get_handle()
+        return self.vnc_lib_fixture
+
+    def get_auth_h(self):
+        if not getattr(self, 'auth', None):
+            if self.inputs.orchestrator == 'openstack':
+                self.auth = OpenstackAuth(self.username, self.password, self.project_name, self.inputs, self.logger)
+            else: # vcenter
+                self.auth = VcenterAuth(self.username, self.password, self.project_name, self.inputs)
+        return self.auth
+
+    def get_orch_h(self):
+        if not getattr(self, 'orch', None):
+            if self.inputs.orchestrator == 'openstack':
+                self.orch = OpenstackOrchestrator(username=self.username,
+                                                  password=self.password,
+                                                  project_name=self.project_name,
+                                                  inputs=self.inputs, logger=self.logger)
+                self.nova_h = self.orch.get_compute_h()
+                self.quantum_h = self.orch.get_network_h()
+            else:
+                self.get_vnc_lib_h()
+                self.orch = VcenterOrchestrator(user=self.username, pwd=self.password,
+                                                host=self.inputs.auth_ip,
+                                                port=self.inputs.auth_port,
+                                                dc_name=self.inputs.vcenter_dc,
+                                                vnc=self.vnc_lib,
+                                                inputs=self.inputs, logger=self.logger)
+        return self.orch
+
+    def get_network_h(self):
+        orch = self.get_orch_h()
+        return orch.get_network_h()
+
+    def get_compute_h(self):
+        orch = self.get_orch_h()
+        return orch.get_compute_h()
+
+    def get_project_fq_name(self):
+        return [self.inputs.domain_name, self.project_name]
+
+    def get_project_id(self):
+        if not getattr(self, 'project_id', None):
+            self.get_auth_h()
+            self.project_id = self.auth.get_project_id(self.inputs.domain_name,
+                                                       self.project_name)
+        return self.project_id
+
+    def get_inspect_handles(self):
+        self.get_api_server_inspect_handles()
+        self.get_control_node_inspect_handles()
+        self.get_dns_agent_inspect_handles()
+        self.get_opserver_inspect_handles()
+        self.get_discovery_service_inspect_handles()
+        for compute_ip in self.inputs.compute_ips:
+            self.get_vrouter_agent_inspect_handle(compute_ip)
+        self.analytics_obj = self.get_analytics_object()
+        self.ds_verification_obj = self.get_discovery_service_object()
+#        for collector_name in self.inputs.collector_names:
+#            self.ops_inspects[collector_name] = VerificationOpsSrv(
+#                collector_ip, logger=self.inputs.logger)
+
+    def get_api_server_inspect_handles(self):
+        for cfgm_ip in self.inputs.cfgm_ips:
+            self.get_api_inspect_handle(cfgm_ip)
+        self.api_server_inspect = self.api_server_inspects.values()[0]
+        return self.api_server_inspects
+
+    def get_control_node_inspect_handles(self):
+        for bgp_ip in self.inputs.bgp_ips:
+            self.get_control_node_inspect_handle(bgp_ip)
+        return self.cn_inspect
+
+    def get_dns_agent_inspect_handles(self):
+        for bgp_ip in self.inputs.bgp_ips:
+            self.get_dns_agent_inspect_handle(bgp_ip)
+        return self.dnsagent_inspect
+
+    def get_opserver_inspect_handles(self):
+        for collector_ip in self.inputs.collector_ips:
+            self.get_opserver_inspect_handle(collector_ip)
+        self.ops_inspect = self.ops_inspects.values()[0]
+        return self.ops_inspects
+
+    def get_discovery_service_inspect_handles(self):
+        for ds_ip in self.inputs.ds_server_ip:
+            self.get_discovery_service_inspect_handle(ds_ip)
+        return self.ds_inspect
+
+    def get_api_inspect_handle(self, host):
+        if host not in self.api_server_inspects:
+            self.api_server_inspects[host]= VNCApiInspect(host, args=self.inputs,
+                                                      logger=self.logger)
+        return self.api_server_inspects[host]
+
+    def get_control_node_inspect_handle(self, host):
+        if host not in self.cn_inspect:
+            self.cn_inspect[host] = ControlNodeInspect(host,
+                                                 logger=self.logger)
+        return self.cn_inspect[host]
+
+    def get_dns_agent_inspect_handle(self, host):
+        if host not in self.dnsagent_inspect:
+            self.dnsagent_inspect[host] = DnsAgentInspect(host,
+                                                 logger=self.logger)
+        return self.dnsagent_inspect[host]
+
+    def get_vrouter_agent_inspect_handle(self, host):
+        if host not in self.agent_inspect:
+            self.agent_inspect[host] = AgentInspect(host,
+                                                 logger=self.logger)
+        return self.agent_inspect[host]
+
+    def get_opserver_inspect_handle(self, host):
+        if host not in self.ops_inspects:
+            self.ops_inspects[host] = VerificationOpsSrv(host,
+                                                 logger=self.logger)
+        return self.ops_inspects[host]
+
+    def get_analytics_object(self):
+        if not getattr(self, 'analytics_obj', None):
+            ops_inspects = self.get_opserver_inspect_handles()
+            self.analytics_obj = AnalyticsVerification(
+                                 self.inputs, ops_inspects, logger=self.logger)
+        return self.analytics_obj
+
+    def get_discovery_service_inspect_handle(self, host):
+        if host not in self.ds_inspect:
+            self.ds_inspect[host] = VerificationDsSrv(
+                                    host, logger=self.logger)
+        return self.ds_inspect[host]
+
+    def get_discovery_service_object(self):
+        if not getattr(self, 'ds_verification_obj', None):
+            self.ds_verification_obj = DiscoveryVerification(self.inputs,
+                                       self.api_server_inspect, self.cn_inspect,
+                                       self.agent_inspect, self.ops_inspects,
+                                       self.ds_inspect, logger=self.logger)
+        return self.ds_verification_obj
 
     def update_inspect_handles(self):
         self.api_server_inspects.clear()
@@ -80,49 +205,16 @@ class ContrailConnections():
         self.agent_inspect.clear()
         self.ops_inspects.clear()
         self.ds_inspect.clear()
-        for cfgm_ip in self.inputs.cfgm_ips:
-            self.api_server_inspects[cfgm_ip] = VNCApiInspect(cfgm_ip,
-                                                              args=self.inputs, logger=self.inputs.logger)
-            self.api_server_inspect = VNCApiInspect(cfgm_ip,
-                                                    args=self.inputs, logger=self.inputs.logger)
-        for bgp_ip in self.inputs.bgp_ips:
-            self.cn_inspect[bgp_ip] = ControlNodeInspect(bgp_ip,
-                                                         logger=self.inputs.logger)
-            self.dnsagent_inspect[bgp_ip] = DnsAgentInspect(bgp_ip,
-                                                            logger=self.inputs.logger)
-        for compute_ip in self.inputs.compute_ips:
-            self.agent_inspect[compute_ip] = AgentInspect(compute_ip,
-                                                          logger=self.inputs.logger)
-        for collector_ip in self.inputs.collector_ips:
-            self.ops_inspects[collector_ip] = VerificationOpsSrv(collector_ip,
-                                                                 logger=self.inputs.logger)
-            self.ops_inspect = VerificationOpsSrv(self.inputs.collector_ip,
-                                                  logger=self.inputs.logger)
+        self.get_inspect_handles()
 
-        for collector_name in self.inputs.collector_names:
-            self.ops_inspects[collector_name] = VerificationOpsSrv(
-                collector_ip,
-                logger=self.inputs.logger)
+    def update_vnc_lib_h(self):
+        if getattr(self, 'vnc_lib_fixture', None):
+            self.vnc_lib_fixture.cleanUp()
+        self.vnc_lib = None
+        self.vnc_lib_fixture = None
+        self.get_vnc_lib_h()
 
-        self.analytics_obj = AnalyticsVerification(
-            self.inputs, self.api_server_inspect, self.cn_inspect, self.agent_inspect, self.ops_inspects, logger=self.inputs.logger)
-        for ds_ip in self.inputs.ds_server_ip:
-            self.ds_inspect[ds_ip] = VerificationDsSrv(
-                ds_ip, logger=self.inputs.logger)
-        self.ds_verification_obj = DiscoveryVerification(
-            self.inputs, self.api_server_inspect, self.cn_inspect, self.agent_inspect, self.ops_inspects, self.ds_inspect, logger=self.inputs.logger)
-    # end update_inspect_handles
-
-    def setUp(self):
-        super(ContrailConnections, self).setUp()
-        pass
-    # end
-
-    def cleanUp(self):
-        super(ContrailConnections, self).cleanUp()
-        pass
-    # end
-
+    # ToDo: msenthil move anything other than connections out of connections.py
     def set_vrouter_config_encap(self, encap1=None, encap2=None, encap3=None):
         self.obj = self.vnc_lib
 
@@ -133,7 +225,7 @@ class ContrailConnections():
                                              'default-global-vrouter-config'])
             current_linklocal=current_config.get_linklocal_services()
         except NoIdError as e:
-            self.inputs.logger.exception('No config id found. Creating new one')
+            self.logger.exception('No config id found. Creating new one')
             current_linklocal=''
 
         encap_obj = EncapsulationPrioritiesType(
@@ -154,7 +246,7 @@ class ContrailConnections():
                                              'default-global-vrouter-config'])
             current_linklocal=current_config.get_linklocal_services()
         except NoIdError as e:
-            self.inputs.logger.exception('No config id found. Creating new one')
+            self.logger.exception('No config id found. Creating new one')
             current_linklocal=''
 
         encaps_obj = EncapsulationPrioritiesType(
@@ -169,7 +261,7 @@ class ContrailConnections():
         self.obj = self.vnc_lib
         try:
             conf_id = self.obj.get_default_global_vrouter_config_id()
-            self.inputs.logger.info("Config id found.Deleting it")
+            self.logger.info("Config id found.Deleting it")
             config_parameters = self.obj.global_vrouter_config_read(id=conf_id)
             self.inputs.config.obj = config_parameters.get_encapsulation_priorities(
             )
@@ -178,7 +270,7 @@ class ContrailConnections():
                 # review this testcase
                 self.obj.global_vrouter_config_delete(id=conf_id)
                 errmsg = "No config id found"
-                self.inputs.logger.info(errmsg)
+                self.logger.info(errmsg)
                 return (errmsg)
             try:
                 encaps1 = self.inputs.config.obj.encapsulation[0]
@@ -197,7 +289,7 @@ class ContrailConnections():
                 return (encaps1, None, None)
         except NoIdError:
             errmsg = "No config id found"
-            self.inputs.logger.info(errmsg)
+            self.logger.info(errmsg)
             return (errmsg)
     # end delete_vrouter_encap
 
@@ -212,7 +304,7 @@ class ContrailConnections():
             result = self.inputs.config.obj.encapsulation
         except NoIdError:
             errmsg = "No config id found"
-            self.inputs.logger.info(errmsg)
+            self.logger.info(errmsg)
         return result
     # end read_vrouter_config_encap
 
@@ -225,7 +317,7 @@ class ContrailConnections():
             self.obj.global_vrouter_config_delete(id=conf_id)
         except Exception:
             msg = "No config id found. Configuring new one"
-            self.inputs.logger.info(msg)
+            self.logger.info(msg)
             pass
         if evpn_status == True:
             conf_obj = GlobalVrouterConfig(evpn_status=True)
@@ -252,7 +344,7 @@ class ContrailConnections():
             self.obj.global_vrouter_config_delete(id=conf_id)
         except NoIdError:
             errmsg = "No config id found"
-            self.inputs.logger.info(errmsg)
+            self.logger.info(errmsg)
     # end delete_vrouter_config_evpn
 
     def read_vrouter_config_evpn(self):
@@ -265,17 +357,6 @@ class ContrailConnections():
                 result = out.evpn_status
         except NoIdError:
             errmsg = "No config id found"
-            self.inputs.logger.info(errmsg)
+            self.logger.info(errmsg)
         return result
     # end read_vrouter_config_evpn
-
-    def update_vnc_lib_fixture(self):
-        self.vnc_lib_fixture.cleanUp()
-        self.vnc_lib_fixture = VncLibFixture(
-            username=self.username, password=self.password,
-            domain=self.inputs.domain_name, project=self.project_name,
-            inputs=self.inputs, cfgm_ip=self.inputs.cfgm_ip,
-            api_port=self.inputs.api_server_port)
-        self.vnc_lib_fixture.setUp()
-        self.vnc_lib = self.vnc_lib_fixture.get_handle()
-    # end update_vnc_lib_fixture()

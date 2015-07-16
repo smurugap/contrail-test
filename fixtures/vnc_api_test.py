@@ -1,37 +1,22 @@
-import fixtures
 from vnc_api.vnc_api import *
-#from contrail_fixtures import contrail_fix_ext
 
-#@contrail_fix_ext (ignore_verify=True, ignore_verify_on_setup=True)
-
-
-class VncLibFixture(fixtures.Fixture):
+class VncLibHelper():
 
     def __init__(self, domain, project, cfgm_ip, api_port, inputs, username='admin', password='contrail123'):
-        self.username = username
-        self.password = password
         self.project = project
         self.domain = domain
-        self.api_server_port = api_port
-        self.cfgm_ip = cfgm_ip
         self.inputs = inputs
         self.logger = inputs.logger
-        self.obj = None
-    # end __init__
-
-    def setUp(self):
-        super(VncLibFixture, self).setUp()
         self.obj = VncApi(
-            username=self.username, password=self.password, tenant_name=self.project,
-            api_server_host=self.cfgm_ip, api_server_port=self.api_server_port)
-    # end setUp
-
-    def cleanUp(self):
-        super(VncLibFixture, self).cleanUp()
+            username=username, password=password, tenant_name=self.project,
+            api_server_host=cfgm_ip, api_server_port=api_port)
 
     def get_handle(self):
         return self.obj
     # end get_handle
+
+    def project_read(self, id=None, fq_name=None):
+        return self.obj.project_read(id=id, fq_name=fq_name)
 
     def get_forwarding_mode(self, vn_fq_name):
         vnc_lib = self.obj
@@ -88,4 +73,22 @@ class VncLibFixture(fixtures.Fixture):
     def id_to_fq_name(self, id):
         return self.obj.id_to_fq_name(id)
 
-# end VncLibFixture1
+    def security_group_read(self, sg_name):
+        sg_fq_name = [self.domain, self.project, sg_name]
+        return self.obj.security_group_read(fq_name=sg_fq_name)
+
+    def get_sg_rules(self, sg_name):
+        sg_obj = self.security_group_read(sg_name)
+        try:
+            rules = sg_obj.get_security_group_entries().get_policy_rule()
+        except AttributeError:
+            self.logger.warn('Unable to fetch rules from SG %s'%sg_name)
+            rules = list()
+        return rules
+
+    def set_sg_rules(self, sg_name, rules):
+        rule_list = PolicyEntriesType(policy_rule=rules)
+        sg_obj = self.security_group_read(sg_name)
+        sg_obj.set_security_group_entries(rule_list)
+        self.obj.security_group_update(sg_obj)
+

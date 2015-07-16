@@ -1,9 +1,9 @@
 import os
 from tcutils.util import *
-from common.openstack_libs import network_client as client
-from common.openstack_libs import network_http_client as HTTPClient
-from common.openstack_libs import network_client_exception as CommonNetworkClientException
-
+from neutronclient.neutron import client
+from neutronclient.client import HTTPClient
+from neutronclient.common.exceptions import NeutronClientException as CommonNetworkClientException
+from keystone_tests import KeystoneCommands
 
 class NetworkClientException(CommonNetworkClientException):
 
@@ -24,52 +24,26 @@ class QuantumHelper():
             self,
             username,
             password,
-            project_id,
+            project_name,
             inputs,
-            cfgm_ip,
             openstack_ip):
-        httpclient = None
-        self.quantum_port = '9696'
-        self.username = username
-        self.password = password
-        self.project_id = get_plain_uuid(project_id)
-        self.cfgm_ip = cfgm_ip
-        self.openstack_ip = openstack_ip
         self.inputs = inputs
-        self.obj = None
-        if not self.inputs.ha_setup:
-            self.auth_url = os.getenv('OS_AUTH_URL') or \
-                'http://' + openstack_ip + ':5000/v2.0'
-        else:
-            self.auth_url = os.getenv('OS_AUTH_URL') or \
-                'http://' + openstack_ip + ':5000/v2.0'
         self.logger = self.inputs.logger
+        auth_url = os.getenv('OS_AUTH_URL') or \
+                        'http://' + openstack_ip + ':5000/v2.0'
         insecure = bool(os.getenv('OS_INSECURE', True))
-        # Quantum Client class does not have tenant_id as argument
-        # So, do quantum auth differently
-        if 'quantum' in client.__name__:
-            self._do_quantum_authentication()
-        else:
-            self.obj = client.Client('2.0', username=self.username,
-                                     password=self.password,
-                                     tenant_id=self.project_id,
-                                     auth_url=self.auth_url)
+        kc = KeystoneCommands(username=username,
+                              password=password,
+                              tenant=project_name,
+                              auth_url=auth_url,
+                              insecure=insecure)
+        self.project_id = kc.get_id().replace('-','')
+        self.obj = client.Client('2.0', username=username,
+                                 password=password,
+                                 tenant_id=self.project_id,
+                                 auth_url=auth_url,
+                                 insecure=insecure)
     # end __init__
-
-    def _do_quantum_authentication(self):
-        try:
-            httpclient = HTTPClient(username=self.username,
-                                    tenant_id= self.project_id,
-                                    password=self.password,
-                                    auth_url=self.auth_url)
-            httpclient.authenticate()
-        except CommonNetworkClientException, e:
-            self.logger.exception('Exception while connection to Quantum')
-            raise e
-        OS_URL = 'http://%s:%s/' % (self.cfgm_ip, self.quantum_port)
-        OS_TOKEN = httpclient.auth_token        
-        self.obj = client.Client('2.0', endpoint_url=OS_URL, token=OS_TOKEN)
-    # end _do_quantum_authentication
 
     def get_handle(self):
         return self.obj
@@ -261,6 +235,9 @@ class QuantumHelper():
                 "Some exception while doing Quantum net-list")
             return None
         return None
+
+    def get_fq_name(self, vn_obj):
+        return vn_obj['network']['contrail:fq_name']
 
     def delete_vn(self, vn_id):
         result = True
@@ -471,6 +448,32 @@ class QuantumHelper():
     def delete_router(self, router_id=None):
         return self.obj.delete_router(router_id)
 
+    def find_router(self, router_name, tenant_id=None):
+        if not tenant_id:
+            tenant_id = self.project_id
+        routers = self.obj.list_routers(tenant_id=tenant_id)['routers']
+        for router in routers:
+            if router['name'] == router_name:
+                return router['id']
+        return None
+
+    def show_router(self, router_name=None, router_id=None, tenant_id=None):
+        try:
+            if not router_id:
+                router_id = self.find_router(router_name, tenant_id)
+            if router_id:
+                return self.obj.show_router(router_id)['router']
+        except CommonNetworkClientException as e:
+            self.logger.exception(
+                'Quantum Exception while retrieving Router %s' % (router_id))
+        return None
+
+    def check_and_create_router(self, router_name, tenant_id=None):
+        response = self.show_router(router_name, tenant_id=tenant_id)
+        if not response:
+            response = self.create_router(router_name, tenant_id)
+        return response
+
     def get_subnets_of_vn(self, vn_id):
         subnets = []
         try:
@@ -532,6 +535,17 @@ class QuantumHelper():
             self.logger.exception(e)
             raise NetworkClientException(message=str(e))
     # end router_gateway_set
+
+    def router_gateway_clear(self, router_id):
+        '''Clear gateway of router
+        '''
+        try:
+            result = self.obj.remove_gateway_router(router_id)
+            return result
+        except NetworkClientException as e:
+            self.logger.exception(e)
+            raise NetworkClientException(message=str(e))
+    # end router_gateway_clear
 
     def update_router(self, router_id, router_dict):
         router_rsp = None

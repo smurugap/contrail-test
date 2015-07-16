@@ -66,6 +66,7 @@ class ContrailTestInit(fixtures.Fixture):
         self.os_type = {}
         self.report_details_file = 'report_details.ini'
         self.config = ConfigParser.ConfigParser()
+        self.ini_file = ini_file
         self.config.read(ini_file)
 
         self.orchestrator = read_config_option(self.config,
@@ -241,8 +242,6 @@ class ContrailTestInit(fixtures.Fixture):
         self.vcenter_dc = None
         if self.orchestrator == 'vcenter':
             self.vcenter_dc = self.read_config_option('vcenter', 'vcenter_dc', None)
-
-        self.check_juniper_intranet()
 
         self.ha_tmp_list = []
     # end __init__
@@ -470,6 +469,12 @@ class ContrailTestInit(fixtures.Fixture):
 
     def get_host_ip(self, name):
         ip = self.host_data[name]['host_ip']
+        if ip in self.ha_tmp_list:
+            ip = self.vip['contrail']
+        return ip
+
+    def get_host_data_ip(self, name):
+        ip = self.host_data[name]['host_data_ip']
         if ip in self.ha_tmp_list:
             ip = self.vip['contrail']
         return ip
@@ -1000,20 +1005,6 @@ class ContrailTestInit(fixtures.Fixture):
         details_h.close()
     # end
 
-    def check_juniper_intranet(self):
-        cmd = 'ping -c 5 ntp.juniper.net'
-        try:
-            # Use http based check if proxy is set.
-            if self.http_proxy:
-                cmd = "http_proxy=%s wget -O /dev/null --timeout=3 --tries=2 ntp.juniper.net" % self.http_proxy
-            subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True)
-            self.is_juniper_intranet = True
-            self.logger.debug('Detected to be inside Juniper Network')
-        except subprocess.CalledProcessError:
-            self.is_juniper_intranet = False
-            self.logger.debug('Detected to be outside of Juniper Network')
-    # end check_juniper_intranet
-
     def get_build_id(self):
         if self.build_id:
             return self.build_id
@@ -1022,10 +1013,14 @@ class ContrailTestInit(fixtures.Fixture):
     def copy_fabfile_to_agents(self):
         host = {}
         for ip in self.compute_ips:
-            host['ip'] = ip
-            host['username'] = self.host_data[ip]['username']
-            host['password'] = self.host_data[ip]['password']
-            copy_file_to_server(host, 'tcutils/fabfile.py', '~/', 'fabfile.py')
+            self.copy_file_to_server(ip, 'tcutils/fabfile.py', '~/', 'fabfile.py')
+
+    def copy_file_to_server(self, ip, src, dstdir, dst):
+        host = {}
+        host['ip'] = ip
+        host['username'] = self.host_data[ip]['username']
+        host['password'] = self.host_data[ip]['password']
+        copy_file_to_server(host, src, dstdir, dst)
     # end copy_fabfile_to_agents
 
     def get_openstack_release(self):

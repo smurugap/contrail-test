@@ -33,7 +33,6 @@ class HABaseTest(test.BaseTestCase):
         cls.inputs = cls.isolated_creds.get_inputs()
         cls.connections = cls.isolated_creds.get_conections() 
         cls.nova_h = cls.connections.nova_h
-        cls.vnc_lib_fixture = cls.connections.vnc_lib_fixture
 #        cls.logger= cls.inputs.logger
         cls.ipmi_list = cls.inputs.hosts_ipmi[0]
     #end setUpClass
@@ -155,7 +154,7 @@ class HABaseTest(test.BaseTestCase):
             self.inputs.ha_tmp_list.append(host)
             if self.inputs.cfgm_ip == host:
                 self.inputs.cfgm_ip = vip
-                self.connections.update_vnc_lib_fixture()
+                self.connections.get_vnc_lib_handle()
         self.connections.update_inspect_handles()
         if service:
             self.addCleanup(self.reset_handles, hosts, service=service)
@@ -178,7 +177,7 @@ class HABaseTest(test.BaseTestCase):
                 self.inputs.ds_server_ip[self.inputs.ds_server_ip.index(vip)] = host
             if self.inputs.cfgm_ip == vip:
                 self.inputs.cfgm_ip = host
-                self.connections.update_vnc_lib_fixture()
+                self.connections.get_vnc_lib_handle()
         self.connections.update_inspect_handles()
         for host in hosts:
             if host in self.inputs.ha_tmp_list:

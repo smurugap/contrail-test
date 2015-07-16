@@ -38,15 +38,12 @@ class VNFixture(fixtures.Fixture):
         vn_fixture.vn_name  : Name of the VN
         vn_fixture.vn_fq_name : FQ name of the VN
     '''
-    def __init__(self, connections, inputs, vn_name=None, policy_objs=[], subnets=[], project_name=None, router_asn='64512', rt_number=None, ipam_fq_name=None, option='quantum', forwarding_mode=None, vxlan_id=None, shared=False, router_external=False, clean_up=True, project_obj= None, af=None, empty_vn=False, enable_dhcp=True, dhcp_option_list=None, disable_gateway=False):
+    def __init__(self, connections, inputs=None, vn_name=None, policy_objs=[], subnets=[], project_name=None, router_asn='64512', rt_number=None, ipam_fq_name=None, option='quantum', forwarding_mode=None, vxlan_id=None, shared=False, router_external=False, clean_up=True, project_obj= None, af=None, empty_vn=False, enable_dhcp=True, dhcp_option_list=None, disable_gateway=False, uuid=None):
         self.connections = connections
-        self.inputs = inputs
-        self.orch = self.connections.orch
-        self.quantum_h = self.connections.quantum_h
-        self.vnc_lib_h = self.connections.vnc_lib
-        self.api_s_inspect = self.connections.api_server_inspect
-        self.agent_inspect = self.connections.agent_inspect
-        self.cn_inspect = self.connections.cn_inspect
+        self.inputs = connections.inputs
+        self.orch = self.connections.get_orch_h()
+        self.quantum_h = self.connections.get_network_h()
+        self.vnc_lib_h = self.connections.get_vnc_lib_h().get_handle()
         self.af = self.get_af_from_subnet(subnets=subnets) or af or self.inputs.get_af()
         if self.inputs.get_af() == 'v6' and self.af == 'v4':
             raise v4OnlyTestException("Skipping Test. v4 specific testcase")
@@ -56,25 +53,34 @@ class VNFixture(fixtures.Fixture):
             project_name = self.inputs.project_name
         if not vn_name:
             vn_name = get_random_name(project_name)
+        self.domain_name = self.inputs.domain_name
+        self.project_name = project_name
+        self.vn_name = vn_name
+        self.fq_name = [self.domain_name, self.project_name, self.vn_name]
+        self.vn_id = uuid
+        if self.vn_id:
+            self.obj = self.quantum_h.get_vn_obj_from_id(self.vn_id)
+            self.fq_name = self.quantum_h.get_fq_name(self.obj)
+            self.vn_name = self.fq_name[-1]
+            self.project_name = self.fq_name[-2]
+
+        self.vn_fq_name = ':'.join(self.fq_name)
+        self.ri_name = self.vn_fq_name + ':' + self.vn_name
         if self.inputs.orchestrator == 'vcenter' and subnets and (len(subnets) != 1):
            raise Exception('vcenter: Multiple subnets not supported')
         if not subnets and not empty_vn:
             subnets = get_random_cidrs(stack=self.af)
         if subnets and self.get_af_from_subnet(subnets=subnets) == 'v6':
             subnets.extend(get_random_cidrs(stack='v4'))
-        self.project_name = project_name
-        self.vn_name = vn_name
         self.vn_subnets = subnets
         if self.inputs.verify_thru_gui():
             self.browser = self.connections.browser
             self.browser_openstack = self.connections.browser_openstack
             self.webui = WebuiTest(self.connections, self.inputs)
-        self.project_id = None
-        self.obj = None
-        self.vn_id = None
+        self.project_id = self.connections.get_project_id()
         self.ipam_fq_name = ipam_fq_name or NetworkIpam().get_fq_name()
         self.policy_objs = policy_objs
-        self.logger = inputs.logger
+        self.logger = self.inputs.logger
         self.already_present = False
         self.verify_is_run = False
         self.router_asn = router_asn
@@ -85,7 +91,6 @@ class VNFixture(fixtures.Fixture):
         self.shared = shared
         self.router_external = router_external
         self.clean_up = clean_up
-        self.analytics_obj = self.connections.analytics_obj
         self.lock = threading.Lock()
         self.verify_result = True
         self.verify_not_in_result = True
@@ -99,8 +104,6 @@ class VNFixture(fixtures.Fixture):
         self.not_in_cn_verification_flag = True
         self._parse_subnets()
         self.project_obj = project_obj
-        self.scale = False
-        self.vn_fq_name = None
         self.enable_dhcp = enable_dhcp
         self.dhcp_option_list = dhcp_option_list
         self.disable_gateway = disable_gateway
@@ -129,6 +132,9 @@ class VNFixture(fixtures.Fixture):
     def get_vn_fq_name(self):
         return self.vn_fq_name
 
+    def get_vrf_name(self):
+        return self.ri_name
+
     def get_af_from_subnet(self, subnets):
         af = None
         if subnets:
@@ -140,18 +146,15 @@ class VNFixture(fixtures.Fixture):
     @retry(delay=10, tries=10)
     def _create_vn_orch(self):
         try:
-            if not self.scale:
-                self.obj = self.orch.get_vn_obj_if_present(
-                                                self.vn_name, project_id=self.project_id)
+            self.obj = self.orch.get_vn_obj_if_present(self.vn_name)
             if not self.obj:
-                self.obj = self.orch.create_vn(
-                                                self.vn_name,
-                                                self.vn_subnets,
-                                                ipam_fq_name=self.ipam_fq_name,
-                                                shared=self.shared,
-                                                router_external=self.router_external,
-                                                enable_dhcp=self.enable_dhcp,
-                                                disable_gateway=self.disable_gateway)
+                self.obj = self.orch.create_vn(self.vn_name,
+                                               self.vn_subnets,
+                                               ipam_fq_name=self.ipam_fq_name,
+                                               shared=self.shared,
+                                               router_external=self.router_external,
+                                               enable_dhcp=self.enable_dhcp,
+                                               disable_gateway=self.disable_gateway)
                 self.logger.debug('Created VN %s' %(self.vn_name))
             else:
                 self.already_present = True
@@ -171,14 +174,14 @@ class VNFixture(fixtures.Fixture):
                 return False
             raise NetworkClientException(message=str(e))
 
-    def get_vn_list_in_project(self, project_uuid):
+    def get_vn_list_in_project(self):
 
-        return self.vnc_lib_h.virtual_networks_list(parent_id=project_uuid)
+        return self.vnc_lib_h.virtual_networks_list(parent_id=self.project_id)
 
-    def verify_if_vn_already_present(self, vn_obj, project):
+    def verify_if_vn_already_present(self, vn_obj):
 
         to_be_created_vn_fq_name = vn_obj.get_fq_name()
-        vn_list = self.get_vn_list_in_project(project.uuid)
+        vn_list = self.get_vn_list_in_project()
         if not vn_list:
             return False
         else:
@@ -189,27 +192,27 @@ class VNFixture(fixtures.Fixture):
                     continue
         return False
 
-    def get_vn_uid(self, vn_obj, project_uuid):
+    def get_vn_uuid(self, vn_obj):
 
-        uid = None
+        uuid = None
         try:
             to_be_created_vn_fq_name = vn_obj.get_fq_name()
-            vn_list = self.get_vn_list_in_project(project_uuid)
+            vn_list = self.get_vn_list_in_project()
             for elem in vn_list['virtual-networks']:
                 if(elem['fq_name'] == to_be_created_vn_fq_name):
-                    uid = elem['uuid']
+                    uuid = elem['uuid']
         except Exception as e:
             self.logger.exception("API exception %s" % (e))
         finally:
-            return uid
+            return uuid
 
-    def _create_vn_api(self, vn_name, project):
+    def _create_vn_api(self, vn_name):
         if self.inputs.orchestrator == 'vcenter':
            raise Exception('vcenter: no support for VN creation through VNC-api')
         try:
             self.api_vn_obj = VirtualNetwork(
-                name=vn_name, parent_obj=project.project_obj)
-            if not self.verify_if_vn_already_present(self.api_vn_obj, project.project_obj):
+                name=vn_name, parent_type='project', fq_name=self.fq_name)
+            if not self.verify_if_vn_already_present(self.api_vn_obj):
                 self.vn_id = self.vnc_lib_h.virtual_network_create(
                     self.api_vn_obj)
                 with self.lock:
@@ -218,7 +221,7 @@ class VNFixture(fixtures.Fixture):
             else:
                 with self.lock:
                     self.logger.info("VN %s already present" % (self.vn_name))
-                self.vn_id = self.get_vn_uid(
+                self.vn_id = self.get_vn_uuid(
                     self.api_vn_obj, project.project_obj.uuid)
             ipam = self.vnc_lib_h.network_ipam_read(
                 fq_name=self.ipam_fq_name)
@@ -236,8 +239,7 @@ class VNFixture(fixtures.Fixture):
             self.api_vn_obj.add_network_ipam(ipam, VnSubnetsType(ipam_sn_lst))
             self.vnc_lib_h.virtual_network_update(self.api_vn_obj)
             self.vn_fq_name = self.api_vn_obj.get_fq_name_str()
-            self.obj = self.quantum_h.get_vn_obj_if_present(self.vn_name,
-                                                                  self.project_id)
+            self.obj = self.quantum_h.get_vn_obj_if_present(self.vn_name)
             if self.obj is None:
                 raise ValueError('could not find %s in neutron/quantum' % (self.vn_name))
 
@@ -253,17 +255,11 @@ class VNFixture(fixtures.Fixture):
         super(VNFixture, self).setUp()
         with self.lock:
             self.logger.info("Creating vn %s.." % (self.vn_name))
-        if not self.project_obj:
-            self.project_obj = self.useFixture(ProjectFixture(
-                                   vnc_lib_h=self.vnc_lib_h,
-                                   project_name=self.project_name,
-                                   connections=self.connections))
-        self.scale = self.project_obj.scale
-        self.project_id = self.project_obj.uuid
+        #self.project_id = self.project_obj.uuid
         if self.inputs.is_gui_based_config():
             self.webui.create_vn(self)
         elif (self.option == 'api'):
-            self._create_vn_api(self.vn_name, self.project_obj)
+            self._create_vn_api(self.vn_name)
         else:
             self._create_vn_orch()
 
@@ -304,6 +300,12 @@ class VNFixture(fixtures.Fixture):
         if self.inputs.orchestrator == 'openstack':
             self.vn_subnet_objs = self.quantum_h.get_subnets_of_vn(self.vn_id)
     # end setUp
+
+    def get_uuid(self):
+        return self.vn_id
+
+    def get_fq_name(self):
+        return self.fq_name
 
     def create_subnet(self, vn_subnet, ipam_fq_name):
         if self.inputs.orchestrator == 'vcenter':
@@ -411,55 +413,56 @@ class VNFixture(fixtures.Fixture):
         False If all Subnet prefixes are not found
         """
         self.api_verification_flag = True
-        self.api_s_vn_obj = self.api_s_inspect.get_cs_vn(
-            project=self.project_name, vn=self.vn_name, refresh=True)
-        if not self.api_s_vn_obj:
-            self.logger.warn("VN %s is not found in API-Server" %
+        api_server_inspect_handles = self.connections.get_api_server_inspect_handles()
+        for api_s_inspect in api_server_inspect_handles.values():
+            api_s_vn_obj = api_s_inspect.get_cs_vn(
+                project=self.project_name, vn=self.vn_name, refresh=True)
+            if not api_s_vn_obj:
+                self.logger.warn("VN %s is not found in API-Server" %
                              (self.vn_name))
-            self.api_verification_flag = self.api_verification_flag and False
-            return False
-        if self.api_s_vn_obj['virtual-network']['uuid'] != self.vn_id:
-            self.logger.warn(
-                "VN Object ID %s in API-Server is not what was created" % (self.vn_id))
-            self.api_verification_flag = self.api_verification_flag and False
-            return False
-
-        subnets = self.api_s_vn_obj[
-            'virtual-network']['network_ipam_refs'][0]['attr']['ipam_subnets']
-        for vn_subnet in self.vn_subnets:
-            subnet_found = False
-            vn_subnet_cidr = str(IPNetwork(vn_subnet['cidr']).ip)
-            for subnet in subnets:
-                if subnet['subnet']['ip_prefix'] == vn_subnet_cidr:
-                    subnet_found = True
-            if not subnet_found:
-                self.logger.warn(
-                    "VN Subnet IP %s not found in API-Server for VN %s" %
-                    (vn_subnet_cidr, self.vn_name))
                 self.api_verification_flag = self.api_verification_flag and False
                 return False
-        # end for
-        self.api_s_route_targets = self.api_s_inspect.get_cs_route_targets(
-            vn_id=self.vn_id)
-        if not self.api_s_route_targets:
-            errmsg = "Route targets not found in API-Server for VN %s" % self.vn_name
-            self.logger.error(errmsg)
-            self.api_verification_flag = self.api_verification_flag and False
-            return False
-        self.rt_names = self.api_s_inspect.get_cs_rt_names(
-            self.api_s_route_targets)
-
-        if self.rt_number:
-            if not any(item.endswith(self.rt_number) for item in self.rt_names):
-                self.logger.warn('RT %s is not found in API Server RT list %s ' %(
-                    self.rt_number, self.rt_names))
+            if api_s_vn_obj['virtual-network']['uuid'] != self.vn_id:
+                self.logger.warn("VN Object ID %s in API-Server"% (self.vn_id)+\
+                                 " is not what was created")
                 self.api_verification_flag = self.api_verification_flag and False
                 return False
-        self.api_verification_flag = self.api_verification_flag and True
+
+            subnets = api_s_vn_obj['virtual-network'][
+                      'network_ipam_refs'][0]['attr']['ipam_subnets']
+            for vn_subnet in self.vn_subnets:
+                subnet_found = False
+                vn_subnet_cidr = str(IPNetwork(vn_subnet['cidr']).ip)
+                for subnet in subnets:
+                    if subnet['subnet']['ip_prefix'] == vn_subnet_cidr:
+                        subnet_found = True
+                if not subnet_found:
+                    self.logger.warn(
+                        "VN Subnet IP %s not found in API-Server for VN %s" %
+                        (vn_subnet_cidr, self.vn_name))
+                    self.api_verification_flag = self.api_verification_flag and False
+                    return False
+            # end for
+            api_s_route_targets = api_s_inspect.get_cs_route_targets(
+                                       vn_id=self.vn_id)
+            if not api_s_route_targets:
+                errmsg = "Route targets not found in API-Server for VN %s" % self.vn_name
+                self.logger.error(errmsg)
+                self.api_verification_flag = self.api_verification_flag and False
+                return False
+            rt_names = api_s_inspect.get_cs_rt_names(api_s_route_targets)
+
+            if self.rt_number:
+                if not any(item.endswith(self.rt_number) for item in self.rt_names):
+                    self.logger.warn('RT %s is not found in API Server RT list %s ' %(
+                        self.rt_number, self.rt_names))
+                    self.api_verification_flag = self.api_verification_flag and False
+                    return False
+            self.api_verification_flag = self.api_verification_flag and True
+            api_s_routing_instance = api_s_inspect.get_cs_routing_instances(
+                vn_id=self.vn_id)
         self.logger.info("Verifications in API Server for VN %s passed" %
                          (self.vn_name))
-        self.api_s_routing_instance = self.api_s_inspect.get_cs_routing_instances(
-            vn_id=self.vn_id)
         return True
     # end verify_vn_in_api_server
 
@@ -583,48 +586,49 @@ class VNFixture(fixtures.Fixture):
         self.logger.info(
             "====Verifying policy data for %s in API_Server ======" %
             (self.vn_name))
-        self.api_s_vn_obj = self.api_s_inspect.get_cs_vn(
-            project=self.project_name, vn=self.vn_name, refresh=True)
-        try:
-            vn_pol = self.api_s_vn_obj[
-                'virtual-network']['network_policy_refs']
-        except:
-            self.logger.debug("=>VN %s has no policy to be verified" %
-                              (self.vn_name))
-            self.policy_verification_flag = {'result': result, 'msg': err_msg}
-            return {'result': result, 'msg': err_msg}
+        api_server_inspect_handles = self.connections.get_api_server_inspect_handles()
+        for api_s_inspect in api_server_inspect_handles.values():
+            api_s_vn_obj = api_s_inspect.get_cs_vn(
+                project=self.project_name, vn=self.vn_name, refresh=True)
+            try:
+                vn_pol = api_s_vn_obj['virtual-network']['network_policy_refs']
+            except:
+                self.logger.debug("=>VN %s has no policy to be verified" %
+                                  (self.vn_name))
+                self.policy_verification_flag = {'result': result, 'msg': err_msg}
+                return {'result': result, 'msg': err_msg}
 
-        # vn_pol is a list of dicts with policy info
-        # check no. of policies in api-s and quantum db for vn
-        if len(vn_pol) != len(self.policy_objs):
-            msg = "VN: " + self.vn_name + \
-                ", No. of policies not same between api-s and quantum db"
-            self.logger.error(msg)
-            err_msg.append(msg)
-            self.logger.debug("Data in API-S: \n")
-            for policy in vn_pol:
-                self.logger.debug('%s, %s' % (policy['to'], policy['uuid']))
-            self.logger.debug("Data in Quantum: \n")
-            for policy in self.policy_objs:
-                self.logger.debug('%s, %s' %
+            # vn_pol is a list of dicts with policy info
+            # check no. of policies in api-s and quantum db for vn
+            if len(vn_pol) != len(self.policy_objs):
+                msg = "VN: " + self.vn_name + \
+                    ", No. of policies not same between api-s and quantum db"
+                self.logger.error(msg)
+                err_msg.append(msg)
+                self.logger.debug("Data in API-S: \n")
+                for policy in vn_pol:
+                    self.logger.debug('%s, %s' % (policy['to'], policy['uuid']))
+                self.logger.debug("Data in Quantum: \n")
+                for policy in self.policy_objs:
+                    self.logger.debug('%s, %s' %
                                   (policy['policy']['id'], policy['policy']['fq_name']))
 
-        # Compare attached policy_fq_names & uuid's
-        for policy in vn_pol:
-            fqn = policy['to']
-            id = policy['uuid']
-            self.logger.info(
-                "==>Verifying data for policy with id: %s, fqn: %s" % (id, fqn))
-            # check if policy with this id exists in quantum
-            d = policy_test_utils.get_dict_with_matching_key_val(
-                'id', id, self.policy_objs, 'policy')
-            if d['state'] == None:
-                err_msg.append(d['ret'])
-            else:
-                out = policy_test_utils.compare_args(
-                    'policy_fqn', fqn, d['ret']['policy']['fq_name'])
-                if out:
-                    err_msg.append(out)
+            # Compare attached policy_fq_names & uuid's
+            for policy in vn_pol:
+                fqn = policy['to']
+                id = policy['uuid']
+                self.logger.info(
+                    "==>Verifying data for policy with id: %s, fqn: %s" % (id, fqn))
+                # check if policy with this id exists in quantum
+                d = policy_test_utils.get_dict_with_matching_key_val(
+                    'id', id, self.policy_objs, 'policy')
+                if d['state'] == None:
+                    err_msg.append(d['ret'])
+                else:
+                    out = policy_test_utils.compare_args(
+                        'policy_fqn', fqn, d['ret']['policy']['fq_name'])
+                    if out:
+                        err_msg.append(out)
 
         if err_msg:
             result = False
@@ -640,11 +644,13 @@ class VNFixture(fixtures.Fixture):
         '''Verify that VN is removed in API Server.
 
         '''
-        if self.api_s_inspect.get_cs_vn(project=self.project_name, vn=self.vn_name, refresh=True):
-            self.logger.warn("VN %s is still found in API-Server" %
-                             (self.vn_name))
-            self.not_in_api_verification_flag = False
-            return False
+        api_server_inspect_handles = self.connections.get_api_server_inspect_handles()
+        for api_s_inspect in api_server_inspect_handles.values():
+            if api_s_inspect.get_cs_vn(project=self.project_name, vn=self.vn_name, refresh=True):
+                self.logger.warn("VN %s is still found in API-Server" %
+                                 (self.vn_name))
+                self.not_in_api_verification_flag = False
+                return False
         self.logger.info("VN %s is not found in API Server" % (self.vn_name))
         self.not_in_api_verification_flag = True
         return True
@@ -656,12 +662,15 @@ class VNFixture(fixtures.Fixture):
 
         False if RT does not match the RT from API-Server for each of control-nodes
         """
-        self.api_s_route_targets = self.api_s_inspect.get_cs_route_targets(
+        api_s_inspects = self.connections.get_api_server_inspect_handles()
+        api_s_inspect = api_s_inspects.values()[0]
+        api_s_route_targets = api_s_inspect.get_cs_route_targets(
             vn_id=self.vn_id)
 
         self.cn_verification_flag = True
         for cn in self.inputs.bgp_ips:
-            cn_config_vn_obj = self.cn_inspect[cn].get_cn_config_vn(
+            cn_inspect = self.connections.get_control_node_inspect_handle(cn)
+            cn_config_vn_obj = cn_inspect.get_cn_config_vn(
                 vn_name=self.vn_name, project=self.project_name)
             if not cn_config_vn_obj:
                 self.logger.warn('Control-node %s does not have VN %s info ' %
@@ -676,8 +685,7 @@ class VNFixture(fixtures.Fixture):
                 self.cn_verification_flag = self.cn_verification_flag and False
                 return False
             # TODO UUID verification to be done once the API is available
-            cn_object = self.cn_inspect[
-                cn].get_cn_routing_instance(ri_name=self.ri_name)
+            cn_object = cn_inspect.get_cn_routing_instance(ri_name=self.ri_name)
             if not cn_object:
                 self.logger.warn(
                     'No Routing Instance found in CN %s with name %s' %
@@ -685,8 +693,7 @@ class VNFixture(fixtures.Fixture):
                 self.cn_verification_flag = self.cn_verification_flag and False
                 return False
             try:
-                rt_names = self.api_s_inspect.get_cs_rt_names(
-                    self.api_s_route_targets)
+                rt_names = api_s_inspect.get_cs_rt_names(api_s_route_targets)
                 if cn_object['export_target'][0] not in rt_names:
                     self.logger.warn(
                         "Route target %s for VN %s is not found in Control-node %s" %
@@ -742,15 +749,15 @@ class VNFixture(fixtures.Fixture):
         result = True
         self.not_in_cn_verification_flag = True
         for cn in self.inputs.bgp_ips:
-            cn_object = self.cn_inspect[
-                cn].get_cn_routing_instance(ri_name=self.ri_name)
+            cn_inspect = self.connections.get_control_node_inspect_handle(cn)
+            cn_object = cn_inspect.get_cn_routing_instance(ri_name=self.ri_name)
             if cn_object:
                 self.logger.warn(
                     "Routing instance for VN %s is still found in Control-node %s" % (self.vn_name, cn))
                 result = result and False
                 self.not_in_cn_verification_flag = result
         # end for
-        if self.cn_inspect[cn].get_cn_config_vn(vn_name=self.vn_name, project=self.project_name):
+        if cn_inspect.get_cn_config_vn(vn_name=self.vn_name, project=self.project_name):
             self.logger.warn("Control-node config DB still has VN %s" %
                              (self.vn_name))
             #import pdb; pdb.set_trace()
@@ -768,10 +775,9 @@ class VNFixture(fixtures.Fixture):
         ''' Verify that VN is removed in all agent nodes.
         '''
         for compute_ip in self.inputs.compute_ips:
-            inspect_h = self.agent_inspect[compute_ip]
+            inspect_h = self.connections.get_vrouter_agent_inspect_handle(compute_ip)
             vn = inspect_h.get_vna_vn(
                 project=self.project_name, vn_name=self.vn_name)
-            print vn
             if vn:
                 self.logger.warn('VN %s is still found in %s ' %
                                  (self.vn_name, compute_ip))
@@ -782,7 +788,7 @@ class VNFixture(fixtures.Fixture):
             if len(vrf_objs['vrf_list']) != 0:
                 self.logger.warn(
                     'VRF %s for VN %s is still found in agent %s' %
-                    (str(self.vrf_name), self.vn_name, compute_ip))
+                    (str(self.ri_name), self.vn_name, compute_ip))
                 self.not_in_agent_verification_flag = False
                 return False
             self.logger.info('VN %s is not present in Agent %s ' %
@@ -796,7 +802,8 @@ class VNFixture(fixtures.Fixture):
         '''Verify vn in the opserver'''
 
         self.logger.info("Verifying the vn in opserver")
-        res = self.analytics_obj.verify_vn_link(self.vn_fq_name)
+        analytics_obj = self.connections.get_analytics_object()
+        res = analytics_obj.verify_vn_link(self.vn_fq_name)
         self.op_verification_flag = res
         return res
 
@@ -953,8 +960,7 @@ class VNFixture(fixtures.Fixture):
         if self.inputs.orchestrator == 'vcenter':
             raise Exception('vcenter: subnets not supported')
         # Get the Quantum details
-        quantum_obj = self.quantum_h.get_vn_obj_if_present(self.vn_name,
-                                                                 self.project_id)
+        quantum_obj = self.quantum_h.get_vn_obj_if_present(self.vn_name)
         #cidr = unicode(subnet)
         if type(subnet) is str:
             cidr = {'cidr': subnet}
@@ -968,14 +974,14 @@ class VNFixture(fixtures.Fixture):
     # end add_subnet
 
     def set_vxlan_network_identifier_mode(self, mode):
-        vnc_lib = self.vnc_lib_h
+        vnc_lib = self.connections.get_vnc_lib_h().get_handle()
         # Set vxlan identifier mode using gloabl vrouter config
         conf_obj = GlobalVrouterConfig(vxlan_network_identifier_mode=mode)
         vnc_lib.global_vrouter_config_update(conf_obj)
     # end set_vxlan_network_identifier_mode
 
     def add_vxlan_id(self, project_fq_name, vn_name, vxlan_id):
-        vnc_lib = self.vnc_lib_h
+        vnc_lib = self.connections.get_vnc_lib_h().get_handle()
         # First set vxlan identifier mode to configured but it should be
         # changed back to automatic
         self.set_vxlan_network_identifier_mode(mode='configured')
@@ -1019,6 +1025,9 @@ class VNFixture(fixtures.Fixture):
 
     def cleanUp(self):
         super(VNFixture, self).cleanUp()
+        self.delete()
+
+    def delete(self, verify=False):
         do_cleanup = True
         if self.inputs.fixture_cleanup == 'no':
             do_cleanup = False
@@ -1031,7 +1040,8 @@ class VNFixture(fixtures.Fixture):
 
         if do_cleanup:
             # Cleanup the route target if created
-            if self.vn_id in self.vn_with_route_target:
+            if getattr(self, 'vn_with_route_target', None) \
+               and self.vn_id in self.vn_with_route_target:
                 self.logger.info('Deleting RT for VN %s ' % (self.vn_name))
                 self.del_route_target(
                     self.ri_name, self.router_asn, self.rt_number)
@@ -1053,7 +1063,7 @@ class VNFixture(fixtures.Fixture):
                         sleep(5)
                     else:
                         break
-            if self.verify_is_run:
+            if self.verify_is_run or verify:
                 assert self.verify_vn_not_in_api_server()
                 assert self.verify_vn_not_in_agent()
                 assert self.verify_vn_not_in_control_nodes()
@@ -1103,8 +1113,7 @@ class VNFixture(fixtures.Fixture):
     def update_vn_object(self):
         if self.inputs.orchestrator == 'openstack':
             self.obj = self.quantum_h.get_vn_obj_from_id(self.vn_id)
-        if not self.scale:
-            self.policy_objs = []
+        self.policy_objs = []
         if not self.policy_objs:
             for policy_fq_name in self.get_current_policies_bound():
                 policy_obj = self.orch.get_policy(policy_fq_name)
