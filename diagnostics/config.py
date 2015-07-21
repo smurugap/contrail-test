@@ -192,7 +192,11 @@ class VM(Base):
                              username, password)
         cmd = 'python /tmp/tcpechoclient.py '+\
               ' --servers %s --dports %s --count 5'%(dst, dport)
-        output = vm_fixture.run_cmd_on_vm(cmds=[cmd])
+        output = vm_fixture.run_cmd_on_vm(cmds=[cmd], as_sudo=True)
+        if not output or not output[cmd]:
+             print 'retry to workaround fab issues'
+             output = vm_fixture.run_cmd_on_vm(cmds=[cmd], as_sudo=True)
+        assert output[cmd], 'Connection timedout'
         exp = 'sent and received 5'
         if exp not in output[cmd]:
             print output[cmd]

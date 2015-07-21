@@ -104,7 +104,7 @@ class traffic(object):
             return self.connections.get_auth_h().get_project_id(fqname[-1])
 
     def verify(self):
-        svm_id = self.args.vm_id
+        svm_ids = self.args.vm_id
         destination = self.args.destination
         for tenant_fqname in self.get_tenant_fqnames():
             project_id = self.get_project_id(tenant_fqname)
@@ -117,33 +117,37 @@ class traffic(object):
             for vn_id in self.get_vn_ids(tenant_fqname, connections):
                 vn_obj = VN(connections)
                 vn_name = vn_obj.get_fixture(vn_id).get_name()
-                if not self.args.destination or not svm_id:
+                if not self.args.destination or not svm_ids:
                     vm_ids = self.get_vm_in_vns(vn_id, tenant_fqname)
                     if not vm_ids:
                         print 'No vms associated with the VN', vn_id
                         continue
-                    svm_id = vm_ids[0]
-
-                # Find destination IP
+                    (vm_ips, vm_names) = self.get_vm_details(vm_ids, vn_name,
+                                                             connections)
                 if not self.args.destination:
-                    dvm_ids = vm_ids[1:]
-                    (dvm_ips, dvm_names) = self.get_vm_details(dvm_ids, vn_name,
-                                                               connections)
-                if self.args.test_vdns:
-                    destination = dvm_names
-                else:
-#ToDo: msenthil - control adding fips to destination
-                    destination = dvm_ips + fips
-
-                svm_obj = VM(connections)
-                (svm_username, svm_password) = self.get_creds(svm_id, tenant_fqname)
-                for dst in list(set(destination)):
-                    if self.args.proto.lower() == 'icmp':
-                        assert svm_obj.ping(svm_id, dst, svm_username, svm_password)
+                    if self.args.test_vdns:
+                        destination = vm_names[1:]
+                    elif self.args.proto.lower() == 'icmp':
+                        destination = dvm_ips[1:] + fips
                     elif self.args.proto.lower() == 'tcp':
-                        assert svm_obj.tcpecho(svm_id, dst,
-                                               username=svm_username,
-                                               password=svm_password)
+                        destination = fips
+
+                if not svm_ids:
+                    if self.args.test_vdns or self.args.proto.lower() == 'icmp':
+                        svm_ids = vm_ids[0]
+                    elif self.args.proto.lower() == 'tcp':
+                        svm_ids = vm_ids
+
+                for svm_id in svm_ids:
+                    svm_obj = VM(connections)
+                    (svm_username, svm_password) = self.get_creds(svm_id, tenant_fqname)
+                    for dst in list(set(destination)):
+                        if self.args.proto.lower() == 'icmp':
+                            assert svm_obj.ping(svm_id, dst, svm_username, svm_password)
+                        elif self.args.proto.lower() == 'tcp':
+                            assert svm_obj.tcpecho(svm_id, dst,
+                                                   username=svm_username,
+                                                   password=svm_password)
 
 def validate_args(args):
     for key, value in args.__dict__.iteritems():
@@ -166,6 +170,8 @@ def validate_args(args):
         args.db_file = os.path.join('/var/tmp/', 'test.db')
     if type(args.fip_pool_id) is str:
        args.fip_pool_id = [args.fip_pool_id]
+    if type(args.vm_id) is str:
+       args.vm_id = [args.vm_id]
     if not args.proto:
         args.proto = 'icmp'
 
