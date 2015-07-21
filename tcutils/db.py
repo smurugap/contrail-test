@@ -290,6 +290,8 @@ class TestDB(object):
     def list_vms_in_vn(self, vn_id, proj_fqname):
         vms = list()
         proj = self.get_project_dict(fqname_to_str(proj_fqname))
+        if not proj.get('virtual-machines', None):
+            return vms
         for vm_name in proj['virtual-machines'].keys():
             if vn_id in proj['virtual-machines'][vm_name]['vns']:
                 vm_dict = self.get_vm_dict(vm_name, fqname_to_str(proj_fqname))

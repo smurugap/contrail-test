@@ -104,7 +104,6 @@ class traffic(object):
             return self.connections.get_auth_h().get_project_id(fqname[-1])
 
     def verify(self):
-        svm_ids = self.args.vm_id
         destination = self.args.destination
         for tenant_fqname in self.get_tenant_fqnames():
             project_id = self.get_project_id(tenant_fqname)
@@ -117,6 +116,7 @@ class traffic(object):
             for vn_id in self.get_vn_ids(tenant_fqname, connections):
                 vn_obj = VN(connections)
                 vn_name = vn_obj.get_fixture(vn_id).get_name()
+                svm_ids = self.args.vm_id
                 if not self.args.destination or not svm_ids:
                     vm_ids = self.get_vm_in_vns(vn_id, tenant_fqname)
                     if not vm_ids:
@@ -128,13 +128,13 @@ class traffic(object):
                     if self.args.test_vdns:
                         destination = vm_names[1:]
                     elif self.args.proto.lower() == 'icmp':
-                        destination = dvm_ips[1:] + fips
+                        destination = vm_ips[1:] + fips
                     elif self.args.proto.lower() == 'tcp':
                         destination = fips
 
                 if not svm_ids:
                     if self.args.test_vdns or self.args.proto.lower() == 'icmp':
-                        svm_ids = vm_ids[0]
+                        svm_ids = vm_ids[:1]
                     elif self.args.proto.lower() == 'tcp':
                         svm_ids = vm_ids
 
