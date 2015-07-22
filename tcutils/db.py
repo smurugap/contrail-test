@@ -335,7 +335,7 @@ class TestDB(object):
     @read
     def get_fips(self, fqname):
         fip_dict = self.get_fip_pool_dict(fqname_to_str(fqname))
-        return fip_dict['fip_ids']
+        return fip_dict.get('fip_ids', [])
 
     @write
     def add_fip(self, fqname, fip_id):
@@ -395,7 +395,7 @@ class TestDB(object):
     @read
     def get_vns_of_lr(self, fqname):
         logical_router = self.get_logical_router_dict(fqname_to_str(fqname))
-        return logical_router['vns']
+        return logical_router.get('vns', [])
 
     @write
     def add_vn_to_lr(self, fqname, vn_id):
@@ -414,7 +414,7 @@ class TestDB(object):
     @write
     def get_gw_of_lr(self, fqname):
         logical_router = self.get_logical_router_dict(fqname_to_str(fqname))
-        return logical_router['gw']
+        return logical_router.get('gw', None)
 
     @write
     def set_gw_to_lr(self, fqname, vn_id):
@@ -424,7 +424,8 @@ class TestDB(object):
     @write
     def clear_gw_from_lr(self, fqname):
         logical_router = self.get_logical_router_dict(fqname_to_str(fqname))
-        del self.db['logical_router']['gw']
+        if 'gw' in logical_router:
+            del logical_router['gw']
 
     @read
     def dump(self):
