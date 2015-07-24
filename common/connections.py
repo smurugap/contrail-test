@@ -53,11 +53,12 @@ class ContrailConnections():
 
     def get_vnc_lib_h(self):
         if not getattr(self, 'vnc_lib', None):
+            auth_host = self.inputs.get_auth_host()
             self.vnc_lib_fixture = VncLibHelper(
                 username=self.username, password=self.password,
                 domain=self.inputs.domain_name, project=self.project_name,
                 inputs=self.inputs, cfgm_ip=self.inputs.cfgm_ip,
-                api_port=self.inputs.api_server_port)
+                api_port=self.inputs.api_server_port, auth_host=auth_host)
             self.vnc_lib = self.vnc_lib_fixture.get_handle()
         return self.vnc_lib_fixture
 
