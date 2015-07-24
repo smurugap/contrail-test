@@ -62,9 +62,10 @@ class create(object):
 
 # Create Tenant
         for tenant_index in range(int(self.args.n_tenants)):
-            self.tenant_name = self.args.tenant or random_string(self.args.tenant_prefix or 'Project')
+            self.tenant_name = self.args.tenant or random_string(self.args.tenant_prefix)
             tenant_obj = Project(self.connections)
             tenant_id = tenant_obj.create(self.tenant_name)
+            tenant_obj.update_default_sg()
             tenant_connections = tenant_obj.get_connections()
             self.db.set_project_id(tenant_obj.fq_name(), tenant_id)
             self.uuid[self.tenant_name] = UUID()

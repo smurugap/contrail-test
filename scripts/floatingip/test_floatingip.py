@@ -1851,7 +1851,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         self.logger.info(
             'Default SG to be edited for allow all on project: %s' %
             projects[0])
-        project_fixture1.set_sec_group_for_allow_all(projects[0], 'default')
+        project_fixture1.set_sec_group_for_allow_all('default')
 
         user2_fixture = self.useFixture(
             UserFixture(
@@ -1883,7 +1883,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         self.logger.info(
             'Default SG to be edited for allow all on project: %s' %
             projects[1])
-        project_fixture2.set_sec_group_for_allow_all(projects[1], 'default')
+        project_fixture2.set_sec_group_for_allow_all('default')
 
         # VN
         vn1_fixture = self.useFixture(

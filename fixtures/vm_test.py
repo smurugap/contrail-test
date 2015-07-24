@@ -986,8 +986,8 @@ class VMFixture(fixtures.Fixture):
         (domain, project, vn_name) = vn_fq_name.split(':')
         if len(self.inputs.compute_ips) > 10:
             #ToDo: msenthil
-            self.logger.warn('Skipping verification on all agents since ',
-                             'there are more than 10 computes in the box',
+            self.logger.warn('Skipping verification on all agents since '+
+                             'there are more than 10 computes in the box, '+
                              'until the subroutine supports gevent')
             return True
 

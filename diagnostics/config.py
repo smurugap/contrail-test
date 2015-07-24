@@ -27,11 +27,15 @@ class Project(Base):
         self.add_user_to_tenant(project_id)
         return project_id
 
-    def add_user_to_tenant(self, project_id):
+    def add_user_to_tenant(self, uuid):
         kc = self.connections.get_auth_h().get_keystone_h()
         user_id = kc.get_user_dct(self.connections.inputs.stack_user)
         role_id = kc.get_role_dct('admin')
-        kc._add_user_to_tenant(project_id.replace('-', ''), user_id, role_id)
+        kc._add_user_to_tenant(uuid.replace('-', ''), user_id, role_id)
+
+    def update_default_sg(self, uuid=None):
+        project_fixture= self.get_fixture(uuid=uuid)
+        project_fixture.set_sec_group_for_allow_all()
 
     def get_connections(self, uuid=None):
         if not getattr(self, 'fixture', None):

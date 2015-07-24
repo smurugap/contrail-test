@@ -2,14 +2,14 @@ from vnc_api.vnc_api import *
 
 class VncLibHelper():
 
-    def __init__(self, domain, project, cfgm_ip, api_port, inputs, username='admin', password='contrail123'):
+    def __init__(self, domain, project, cfgm_ip, api_port, inputs, username='admin', password='contrail123', auth_host=None):
         self.project = project
         self.domain = domain
         self.inputs = inputs
         self.logger = inputs.logger
         self.obj = VncApi(
             username=username, password=password, tenant_name=self.project,
-            api_server_host=cfgm_ip, api_server_port=api_port)
+            api_server_host=cfgm_ip, api_server_port=api_port, auth_host=auth_host)
 
     def get_handle(self):
         return self.obj

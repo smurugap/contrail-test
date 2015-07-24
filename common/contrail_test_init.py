@@ -290,6 +290,9 @@ class ContrailTestInit(fixtures.Fixture):
         self.copy_fabfile_to_agents()
     # end setUp
 
+    def get_auth_host(self):
+        return getattr(self, 'auth_ip', None)
+
     def verify_thru_gui(self):
         '''
         Check if GUI based verification is enabled
