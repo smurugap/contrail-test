@@ -63,7 +63,7 @@ class ContrailTestInit(fixtures.Fixture):
         self.contrail_version = None
         self.single_node = self.get_os_env('SINGLE_NODE_IP')
         self.jenkins_trigger = self.get_os_env('JENKINS_TRIGGERED')
-        self.os_type = {}
+        self.os_type = custom_dict(self.get_os_version)
         self.report_details_file = 'report_details.ini'
         self.config = ConfigParser.ConfigParser()
         self.ini_file = ini_file
@@ -252,7 +252,6 @@ class ContrailTestInit(fixtures.Fixture):
             self.prov_data = self._create_prov_data()
         else:
             self.prov_data = self._read_prov_file()
-        self.os_type = self.get_os_version()
         self.build_id = self.get_build_id()
 
         self.username = self.host_data[self.cfgm_ip]['username']
@@ -287,7 +286,6 @@ class ContrailTestInit(fixtures.Fixture):
             'contrail-snmp-collector', 'contrail-topology']
         self.correct_states = ['active', 'backup']
         self.mysql_token = self.get_mysql_token()
-        self.copy_fabfile_to_agents()
     # end setUp
 
     def get_auth_host(self):
@@ -322,31 +320,27 @@ class ContrailTestInit(fixtures.Fixture):
             return ''
     # end get_os_env
 
-    def get_os_version(self):
+    def get_os_version(self, host_ip):
         '''
         Figure out the os type on each node in the cluster
         '''
-
-        if self.os_type:
-            return self.os_type
-        for host_ip in self.host_ips:
-            username = self.host_data[host_ip]['username']
-            password = self.host_data[host_ip]['password']
-            with settings(
+        username = self.host_data[host_ip]['username']
+        password = self.host_data[host_ip]['password']
+        with settings(
                 host_string='%s@%s' % (username, host_ip), password=password,
-                    warn_only=True, abort_on_prompts=False):
-                output = run('uname -a')
-                if 'el6' in output:
-                    self.os_type[host_ip] = 'centos_el6'
-                if 'fc17' in output:
-                    self.os_type[host_ip] = 'fc17'
-                if 'xen' in output:
-                    self.os_type[host_ip] = 'xenserver'
-                if 'Ubuntu' in output:
-                    self.os_type[host_ip] = 'ubuntu'
-                if 'el7' in output:
-                    self.os_type[host_ip] = 'redhat'
-        return self.os_type
+                warn_only=True, abort_on_prompts=False):
+            output = run('uname -a')
+            if 'el6' in output:
+                return 'centos_el6'
+            if 'fc17' in output:
+                return 'fc17'
+            if 'xen' in output:
+                return 'xenserver'
+            if 'Ubuntu' in output:
+                return 'ubuntu'
+            if 'el7' in output:
+                return 'redhat'
+        return None
     # end get_os_version
 
     def read_config_option(self, section, option, default_option):
@@ -1012,11 +1006,6 @@ class ContrailTestInit(fixtures.Fixture):
         if self.build_id:
             return self.build_id
         return self.get_contrail_version('contrail-install-packages')
-
-    def copy_fabfile_to_agents(self):
-        host = {}
-        for ip in self.compute_ips:
-            self.copy_file_to_server(ip, 'tcutils/fabfile.py', '~/', 'fabfile.py')
 
     def copy_file_to_server(self, ip, src, dstdir, dst):
         host = {}

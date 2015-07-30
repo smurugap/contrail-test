@@ -6,7 +6,7 @@ from collections import defaultdict
 from netaddr import *
 import pprint
 from fabric.operations import get, put, sudo
-from fabric.api import run
+from fabric.api import run, env
 import logging as log
 import threading
 from functools import wraps
@@ -23,6 +23,8 @@ from fabric.contrib.files import exists
 from fabric.context_managers import settings, hide
 import ConfigParser
 from testtools.testcase import TestSkipped
+
+fab_copied_to_hosts = list()
 
 log.basicConfig(format='%(levelname)s: %(message)s', level=log.DEBUG)
 
@@ -159,6 +161,15 @@ def remove_unwanted_output(text):
     real_output = '\n'.join(return_list1)
     return real_output
 
+def copy_fabfile_to_agent():
+    src = 'tcutils/fabfile.py'
+    dst = '~/fabfile'
+    global fab_copied_to_hosts
+    if not env.host_string in fab_copied_to_hosts:
+        print env.host_string
+        if not exists(dst):
+            put(src, dst)
+        fab_copied_to_hosts.append(env.host_string)
 
 def run_fab_cmd_on_node(host_string, password, cmd, as_sudo=False, timeout=120, as_daemon=False):
     '''
@@ -166,6 +177,7 @@ def run_fab_cmd_on_node(host_string, password, cmd, as_sudo=False, timeout=120, 
     '''
     cmd = _escape_some_chars(cmd)
     (username, host_ip) = host_string.split('@')
+    copy_fabfile_to_agent()
     cmd_str = 'fab -u %s -p "%s" -H %s -D -w --hide status,user,running ' % (
         username, password, host_ip)
     if as_daemon:
@@ -204,6 +216,7 @@ def run_fab_cmd_on_node(host_string, password, cmd, as_sudo=False, timeout=120, 
 
 def fab_put_file_to_vm(host_string, password, src, dest):
     (username, host_ip) = host_string.split('@')
+    copy_fabfile_to_agent()
     cmd_str = 'fab -u %s -p "%s" -H %s -D -w --hide status,user,running fput:\"%s\",\"%s\"' % (
         username, password, host_ip, src, dest)
     log.debug(cmd_str)
@@ -597,3 +610,25 @@ class Singleton(type):
             lock.release()
         return cls._instances[cls]
 #end Singleton
+
+class custom_dict(dict):
+    '''
+    custom dict wrapper around dict which could be used in scenarios
+    where setitem can be deffered until getitem is requested
+    '''
+
+    def __init__(self, set_wrapper=None, validate_set=None):
+        self.set_wrapper = set_wrapper
+        self.validate_set = validate_set
+
+    def __getitem__(self, key):
+        try:
+            return dict.__getitem__(self, key)
+        except KeyError:
+            self[key] = self.set_wrapper(key)
+            return dict.__getitem__(self, key)
+
+    def __setitem__(self, key, value):
+        if self.validate_set:
+            self.validate_set(key, value)
+        dict.__setitem__(self, key, value)
