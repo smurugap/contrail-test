@@ -70,9 +70,9 @@ class verify(object):
 
     def get_vn_ids(self, project_fqname, connections):
         if self.args.vn_name:
-            vn_id = connections.get_network_h().get_vn_id(self.args.vn_name)
+            vn_id = [connections.get_network_h().get_vn_id(x) for x in self.args.vn_name]
             assert vn_id, 'Unable to fetch ID of vn_name '+ self.args.vn_name
-            return [vn_id]
+            return vn_id
         vns = []
         if self.db:
             for fqname in self.db.list_virtual_networks(project_fqname):
@@ -82,8 +82,11 @@ class verify(object):
 
     def get_vm_details(self, vm_name, project_fqname, connections):
         if self.args.vm_id:
-            vn_id = connections.get_network_h().get_vn_id(self.args.vn_name)
-            return (self.args.vm_id, [vn_id], self.args.username, self.args.password)
+            if not self.args.vn_name:
+                vm_obj = connections.get_orch_h().get_vm_by_id(vm_id=self.args.vm_id)
+                self.args.vn_name = connections.get_orch_h().get_networks_of_vm(vm_obj)
+            vn_ids = [connections.get_network_h().get_vn_id(x) for x in self.args.vn_name]
+            return (self.args.vm_id, vn_ids, self.args.username, self.args.password)
         if self.db:
             return self.db.get_virtual_machine(vm_name, project_fqname)
         return None
@@ -99,7 +102,8 @@ class verify(object):
         if self.db:
             return self.db.get_project_id(fqname)
         else:
-            return self.connections.get_auth_h().get_project_id(fqname[-1])
+            project = fqname.split(':')[-1]
+            return self.connections.get_auth_h().get_project_id(project_name=project)
 
     def get_fip_ids(self, vm_name, project_fqname):
         if self.db:
@@ -155,9 +159,6 @@ def validate_args(args):
         args.testbed_file = os.path.join(os.path.abspath(
                                          os.path.dirname(__file__)),
                                          '../', 'sanity_params.ini')
-    if not args.db_file:
-        args.db_file = os.path.join('/var/tmp/', 'test.db')
-
     if args.vm_id and not (args.username and args.password):
         raise Exception('Need VM username and password')
 
@@ -178,7 +179,7 @@ def parse_cli(args):
                         
     parser.add_argument('--tenant', default=None,
                         help='Tenant name []')
-    parser.add_argument('--vn_name', default=None,
+    parser.add_argument('--vn_name', default=None, nargs='+',
                         help='Name of virtual network')
     parser.add_argument('--vdns', default=None,
                         help='UUID of virtual DNS')

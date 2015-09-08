@@ -1,0 +1,36 @@
+global:
+    db_file: /root/test.db.scale
+    testbed_file: /root/scale_1/contrail-test/sanity_params.ini
+
+default:
+    name:
+    public_vn: PublicVN
+    fip_pool_id:         # Set it to fip_pool_id or True to verify fips
+    vdns_id: True        # Set it to vdns_id or True to create one
+    ipam_id: True        # Set it to ipam_id or True to create one
+    router_id: True      # Set it to router_id or True to create one
+    vn_name:
+    vm_id:
+    image: ubuntu        # Image name
+    vm_username:
+    vm_password:
+    n_vns: 5
+    n_vms: 5
+    n_fips: 
+    n_tenants: 100 # No of tenants to create not including the explicit tenants mentioned under tenants block
+
+tenant:
+    - PublicTenant:
+          n_vns: 1
+          n_vms: 20
+          n_fips: 20
+          vdns_id: False
+          ipam_id: False
+          router_id: False
+
+traffic:
+    destination: 
+    proto: icmp      # Supports icmp and tcp (if destination is not specificed then tcp would test fips alone)
+    dport:
+    vdns:        # Set it to True to test vdns ping within the vn
+

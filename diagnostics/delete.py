@@ -1,3 +1,4 @@
+import yaml
 import sys
 import string
 import argparse
@@ -41,6 +42,8 @@ class delete(object):
         if not self.args.delete_vdns or self.args.tenant:
             return []
         vdns = []
+        if self.args.vdns_id:
+            return self.args.vdns_id
         if self.db:
             for fqname in self.db.list_vdns():
                 vdns.append(self.db.get_vdns_id(fqname))
@@ -50,6 +53,8 @@ class delete(object):
         if not self.args.delete_fip_pool or self.args.tenant:
             return []
         fip_pools = []
+        if self.args.fip_pool_id:
+            return self.args.fip_pool_id
         if self.db:
             for fqname in self.db.list_fip_pools():
                 fip_pools.append(self.db.get_fip_pool_id(fqname))
@@ -66,8 +71,8 @@ class delete(object):
         ipams = []
         if not self.args.delete_ipam or self.args.vn_name:
             return ipams
-        if self.args.ipam:
-            return self.args.ipam
+        if self.args.ipam_id:
+            return self.args.ipam_id
         if self.db:
             for fqname in self.db.list_ipams(project_fqname):
                 ipams.append(self.db.get_ipam_id(fqname))
@@ -192,25 +197,27 @@ class delete(object):
             if self.db:
                 self.db.delete_fip_pool(fqname)
 
-        self._delete(':'.join(self.connections.get_project_fq_name()),
-                     self.connections)
+        if not self.args.tenant or self.args.tenant == self.connections.project_name:
+            self._delete(':'.join(self.connections.get_project_fq_name()),
+                         self.connections)
 
-        vdns_ids = self.get_vdns_ids()
-        for vdns_id in vdns_ids:
-            obj = vDNS(self.connections)
-            fqname = obj.fq_name(vdns_id)
-            obj.delete(vdns_id)
-            if self.db:
-                self.db.delete_vdns(fqname)
+            vdns_ids = self.get_vdns_ids()
+            for vdns_id in vdns_ids:
+                obj = vDNS(self.connections)
+                fqname = obj.fq_name(vdns_id)
+                obj.delete(vdns_id)
+                if self.db:
+                    self.db.delete_vdns(fqname)
 
 def validate_args(args):
     for key, value in args.__dict__.iteritems():
-        if value == 'None':
-            args.__dict__[key] = None
-        if value == 'False':
-            args.__dict__[key] = False
-        if value == 'True':
-            args.__dict__[key] = True
+        if type(value) is str:
+            if value.lower() == 'none':
+                args.__dict__[key] = None
+            if value.lower() == 'false':
+                args.__dict__[key] = False
+            if value.lower() == 'true':
+                args.__dict__[key] = True
 
     if (args.vm_id or args.vn_name) and not args.tenant:
         raise Exception('Need tenant name too. use --tenant <tenant_name>')
@@ -219,15 +226,24 @@ def validate_args(args):
         args.testbed_file = os.path.join(os.path.abspath(
                                          os.path.dirname(__file__)),
                                          '../', 'sanity_params.ini')
-    if not args.db_file:
-        args.db_file = os.path.join('/var/tmp/', 'test.db')
+#    if not args.db_file:
+#        args.db_file = os.path.join('/var/tmp/', 'test.db')
 
-    if type(args.vdns) is str:
-       args.vdns = [args.vdns]
-    if type(args.ipam) is str:
-       args.ipam = [args.ipam]
+    if type(args.vdns_id) is str:
+       args.vdns_id = [args.vdns_id]
+    if type(args.ipam_id) is str:
+       args.ipam_id = [args.ipam_id]
     if type(args.fip_pool_id) is str:
        args.fip_pool_id = [args.fip_pool_id]
+
+    if args.vdns_id == True:
+        args.vdns_id = None
+    if args.router_id == True:
+        args.router_id = None
+    if args.ipam_id == True:
+        args.ipam_id = None
+    if args.fip_pool_id == True:
+        args.fip_pool_id = None
 
 def parse_cli(args):
     '''Define and Parse arguments for the script'''
@@ -237,31 +253,66 @@ def parse_cli(args):
     parser.add_argument('--db_file', default=None,
                         help='Specify database file', metavar="FILE")
 
-    parser.add_argument('--vdns', default=None,
-                        help='UUID of virtual DNS')
     parser.add_argument('--tenant', default=None,
                         help='Tenant name []')
-    parser.add_argument('--ipam', default=None,
+    parser.add_argument('--vdns_id', default=None,
+                        help='UUID of virtual DNS')
+    parser.add_argument('--ipam_id', default=None,
                         help='IPAM UUID')
+    parser.add_argument('--router_id', default=None,
+                        help='UUID of Logical Router(snat)')
     parser.add_argument('--vn_name', default=None,
                         help='Name of virtual network')
+
     parser.add_argument('--vm_id', default=None,
                         help='UUID of Virtual Machine')
-    parser.add_argument('--router_id', default=None,
-                        help='UUID of Logical Router')
     parser.add_argument('--fip_pool_id', default=None,
                         help='UUID of Floating IP Pool')
 
-    parser.add_argument('--delete_vdns', action='store_true',
-                        help='Knob to delete vdns')
-    parser.add_argument('--delete_ipam', action='store_true',
-                        help='Knob to delete ipam')
-    parser.add_argument('--delete_snat', action='store_true',
-                        help='Knob to delete Logical Router')
-    parser.add_argument('--delete_fip_pool', action='store_true',
-                        help='Knob to delete fip pool')
+    args = dict(parser.parse_known_args(args)[0]._get_kwargs())
+    return create_per_tenant_args(args['tenant'], dict(), dict(), args)
 
-    return dict(parser.parse_known_args(args)[0]._get_kwargs())
+def populate_args(args):
+    args['delete_vdns'] = False
+    args['delete_snat'] = False
+    args['delete_ipam'] = False
+    args['delete_fip_pool'] = False
+    if args['vdns_id']:
+        args['delete_vdns'] = True
+    if args['router_id']:
+        args['delete_snat'] = True
+    if args['ipam_id']:
+        args['delete_ipam'] = True
+    if args['fip_pool_id']:
+        args['delete_fip_pool'] = True
+
+def create_per_tenant_args(name, default_args, global_args, tenant_args=None):
+    tenant = default_args.copy()
+    if tenant_args:
+        tenant.update(tenant_args)
+        populate_args(tenant)
+    tenant['tenant'] = name
+    tenant.update(global_args)
+    return tenant
+
+def parse_yaml(conf, cli_args):
+    config = yaml.load(open(conf, 'r'))
+    if cli_args:
+        update_args(config['default'], cli_args)
+    n_tenants = config['default'].get('n_tenants', 0) or 0
+    pargs = dict()
+    populate_args(config['default'])
+#    for index in range(n_tenants):
+#        name = (config['default']['name'] or 'TestProject') + str(index)
+#        pargs[name] = create_per_tenant_args(name, config['default'],
+#                                             config['global'])
+    for entry in config['tenant']:
+        name = entry.keys()[0]
+        pargs[name] = create_per_tenant_args(name, config['default'],
+                                             config['global'], entry[name])
+    if cli_args['tenant'] in pargs.keys():
+        update_args(pargs[name], cli_args)
+    return pargs
 
 def update_args(ini_args, cli_args):
     for key in cli_args.keys():
@@ -273,22 +324,25 @@ class Struct(object):
     def __init__(self, entries):
         self.__dict__.update(entries)
 
+    def __getattr__(self, attrib):
+        print ' am i here'
+        return getattr(self, attrib, None)
+
 def main():
     signal.signal(signal.SIGTERM, sig_handler)
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("-i", "--ini_file", help="Specify conf file", metavar="FILE")
-    args, remaining_argv = parser.parse_known_args(sys.argv[1:])
+    parser.add_argument("-c", "--config", help="Specify conf file", metavar="FILE")
+    pargs, remaining_argv = parser.parse_known_args(sys.argv[1:])
     cli_args = parse_cli(remaining_argv)
-    if args.ini_file:
-        ini_args = parse_cfg_file(args.ini_file)
-        args = update_args(ini_args['TEST'], cli_args)
-        args.update(update_args(ini_args['DEFAULTS'], cli_args))
+    if pargs.config:
+        cargs = parse_yaml(pargs.config, cli_args)
     else:
-        args = cli_args
-    args = Struct(args)
-    validate_args(args)
-    obj = delete(args)
-    obj.delete()
+        cargs = {None: cli_args}
+    for key, tenant in cargs.iteritems():
+        tenant_args = Struct(tenant)
+        validate_args(tenant_args)
+        obj = delete(tenant_args)
+        obj.delete()
 
 if __name__ == "__main__":
     main()

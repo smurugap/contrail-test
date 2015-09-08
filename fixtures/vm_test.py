@@ -54,6 +54,7 @@ class VMFixture(fixtures.Fixture):
         self.quantum_h = self.connections.get_network_h()
         self.vnc_lib_h = self.connections.get_vnc_lib_h().get_handle()
         self.nova_h = self.connections.get_compute_h()
+        self.logger = self.connections.logger
         self.node_name = node_name
         self.zone = zone
         self.sg_ids = sg_ids
@@ -61,11 +62,33 @@ class VMFixture(fixtures.Fixture):
         self.port_ids = port_ids
         self.fixed_ips = fixed_ips
         self.subnets = subnets
+        self.vm_obj = None
+        self.vm_ip_dict = {}
+        if not project_name:
+            project_name = self.inputs.stack_tenant
+        if vm_name is None:
+            vm_name = get_random_name(project_name)
+        self.project_name = project_name
+        self.vm_name = vm_name
         if vn_obj:
             vn_objs = [vn_obj]
             self.vn_obj = vn_obj
-        if not vn_objs and vn_ids:
-            vn_objs = [self.quantum_h.get_vn_obj_from_id(id=vn_id) for vn_id in vn_ids]
+        if uuid:
+            self.logger.info('Retrieving VM info of %s'%uuid)
+            self.vm_id = uuid
+            self.vm_obj = self.orch.get_vm_by_id(vm_id=self.vm_id)
+            if not self.vm_obj:
+                raise Exception('VM with id %s not found'%self.vm_id)
+            self.vm_objs = [self.vm_obj]
+            self.vm_ip_dict = self.get_vm_ip_dict()
+            self.vm_name = self.vm_obj.name
+            if not vn_ids:
+                vn_names = self.orch.get_networks_of_vm(self.vm_obj)
+                vn_objs = [self.orch.get_vn_obj_if_present(vn_name) for vn_name in vn_names]
+                vn_ids = [self.orch.get_vn_id(vn_obj) for vn_obj in vn_objs]
+        if not vn_objs:
+            if vn_ids:
+                vn_objs = [self.quantum_h.get_vn_obj_from_id(id=vn_id) for vn_id in vn_ids if vn_id]
         if type(vn_objs) is not list:
             self.vn_objs = [vn_objs]
         else:
@@ -82,13 +105,6 @@ class VMFixture(fixtures.Fixture):
                 raise v4OnlyTestException('Disabling v6 tests for CI')
             image_name = os.environ.get('ci_image')
         self.image_name = image_name
-        if not project_name:
-            project_name = self.inputs.stack_tenant
-        if vm_name is None:
-            vm_name = get_random_name(project_name)
-        self.project_name = project_name
-        self.vm_name = vm_name
-        self.vm_obj = None
         self.vm_ip = None
         self.vn_names = [self.orch.get_vn_name(x) for x in self.vn_objs]
         # self.vn_fq_names = [':'.join(x['network']['contrail:fq_name'])
@@ -98,7 +114,6 @@ class VMFixture(fixtures.Fixture):
         if len(vn_objs) == 1:
             self.vn_name = self.vn_names[0]
             self.vn_fq_name = self.vn_fq_names[0]
-        self.logger = self.inputs.logger
         self.already_present = False
         self.verify_is_run = False
         self.analytics_obj = self.connections.get_analytics_object()
@@ -113,7 +128,6 @@ class VMFixture(fixtures.Fixture):
         self.agent_vxlan_id = {}
         self.local_ips = {}
         self.local_ip = None
-        self.vm_ip_dict = {}
         self.cs_vmi_obj = {}
         self.vm_launch_flag = True
         self.vm_in_api_flag = True
@@ -136,15 +150,6 @@ class VMFixture(fixtures.Fixture):
             self.browser_openstack = self.connections.browser_openstack
             self.webui = WebuiTest(self.connections, self.inputs)
         self.project_id = self.connections.get_project_id()
-        if uuid:
-            self.vm_id = uuid
-            self.vm_obj = self.orch.get_vm_by_id(vm_id=self.vm_id)
-            if not self.vm_obj:
-                raise Exception('VM with id %s not found'%self.vm_id)
-            self.vm_objs = [self.vm_obj]
-            self.vm_ip_dict = self.get_vm_ip_dict()
-            self.vm_name = self.vm_obj.name
-
     # end __init__
 
     def setUp(self):
@@ -208,6 +213,8 @@ class VMFixture(fixtures.Fixture):
             vm_ips = self.get_vm_ip_dict()[vn_fq_name]
         else:
             if not getattr(self, 'vm_ips', None):
+                if not self.vn_names:
+                    self.vn_names = self.orch.get_networks_of_vm(self.vm_obj)
                 self.vm_ips = []
                 for vm_obj in self.vm_objs:
                     for vn_name in self.vn_names:
@@ -475,30 +482,75 @@ class VMFixture(fixtures.Fixture):
     def get_vm_obj_from_api_server(self, refresh=False):
         if not getattr(self, 'cs_vm_obj', None) or refresh:
             self.cs_vm_obj = dict()
+            vm_objs = dict()
             for cfgm_ip in self.inputs.cfgm_ips:
                 api_inspect = self.connections.get_api_inspect_handle(cfgm_ip)
-                self.cs_vm_obj[cfgm_ip] = api_inspect.get_cs_vm(self.vm_id, refresh)
+                try:
+                    vm_obj = api_inspect.get_cs_vm(self.vm_id, refresh)
+                except TypeError:
+                    vm_obj = None
+                if vm_obj:
+                    vm_objs = vm_obj
+            if vm_objs and None not in vm_objs.values():
+                self.cs_vm_obj = vm_objs
         return self.cs_vm_obj
+
+    @retry(delay=1, tries=5)
+    def get_vm_objs(self):
+        vm_obj = self.get_vm_obj_from_api_server()
+        if not vm_obj or not vm_obj.values()[0]:
+            return (False, None)
+        return (True, vm_obj.values()[0])
 
     def get_vmi_obj_from_api_server(self, refresh=False):
         if not getattr(self, 'cs_vmi_objs', None) or refresh:
             self.cs_vmi_objs = dict()
+            vmi_objs = dict()
             for cfgm_ip in self.inputs.cfgm_ips:
                 api_inspect = self.connections.get_api_inspect_handle(cfgm_ip)
-                self.cs_vmi_objs[cfgm_ip] = api_inspect.get_cs_vmi_of_vm(self.vm_id, refresh)
+                try:
+                    vmi_obj = api_inspect.get_cs_vmi_of_vm(self.vm_id, refresh)
+                except TypeError:
+                    vmi_obj = None
+                if vmi_obj:
+                    vmi_objs[cfgm_ip] = vmi_obj
+            if vmi_objs and None not in vmi_objs.values():
+                self.cs_vmi_objs = vmi_objs
         return self.cs_vmi_objs
+
+    @retry(delay=1, tries=5)
+    def get_vmi_objs(self, refresh=False):
+        vmi_obj = self.get_vmi_obj_from_api_server(refresh)
+        if not vmi_obj or not vmi_obj.values()[0]:
+            return (False, None)
+        return (True, vmi_obj.values()[0])
 
     def get_iip_obj_from_api_server(self, refresh=False):
         if not getattr(self, 'cs_instance_ip_objs', None) or refresh:
             self.cs_instance_ip_objs = dict()
+            iip_objs = dict()
             for cfgm_ip in self.inputs.cfgm_ips:
                 api_inspect = self.connections.get_api_inspect_handle(cfgm_ip)
-                self.cs_instance_ip_objs[cfgm_ip] = api_inspect.get_cs_instance_ips_of_vm(self.vm_id, refresh)
+                try:
+                    iip_obj = api_inspect.get_cs_instance_ips_of_vm(self.vm_id, refresh)
+                except TypeError:
+                    iip_obj = None
+                if iip_obj:
+                    iip_objs[cfgm_ip] = iip_obj
+            if iip_objs and None not in iip_objs.values():
+                self.cs_instance_ip_objs = iip_objs
         return self.cs_instance_ip_objs
+
+    @retry(delay=1, tries=5)
+    def get_iip_objs(self, refresh=False):
+        iip_obj = self.get_iip_obj_from_api_server(refresh)
+        if not iip_obj or not iip_obj.values()[0]:
+            return (False, None)
+        return (True, iip_obj)
 
     def get_vm_ip_dict(self):
         if not getattr(self, 'vm_ip_dict', None):
-            iip_objs = self.get_iip_obj_from_api_server().values()[0]
+            iip_objs = self.get_iip_objs()[1].values()[0]
             for iip_obj in iip_objs:
                 ip = iip_obj['instance-ip']['instance_ip_address']
                 vn_fq_name = ':'.join(iip_obj['instance-ip']['virtual_network_refs'][0]['to'])
@@ -516,9 +568,9 @@ class VMFixture(fixtures.Fixture):
         Checks if the virtual-machine-interface's VN in API Server is correct.
         '''
         self.vm_in_api_flag = True
-        self.cs_vm_obj = self.get_vm_obj_from_api_server()
-        self.cs_vmi_objs = self.get_vmi_obj_from_api_server()
-        self.cs_instance_ip_objs = self.get_iip_obj_from_api_server()
+        self.cs_vm_obj = self.get_vm_objs()[1]
+        self.get_vmi_objs()[1]
+        self.cs_instance_ip_objs = self.get_iip_objs()[1]
 
         for cfgm_ip in self.inputs.cfgm_ips:
             self.logger.info("Verifying in api server %s" % (cfgm_ip))
@@ -589,7 +641,7 @@ class VMFixture(fixtures.Fixture):
                                      'for VM %s' % (self.vm_name))
                 self.verify_vm_not_in_api_server_flag = self.verify_vm_not_in_api_server_flag and False
                 return False
-            if self.get_vmi_obj_from_api_server(refresh=True)[ip]:
+            if self.get_vmi_obj_from_api_server(refresh=True):
                 with self.printlock:
                     self.logger.warn("API-Server still has VMI info of VM %s"
                                      % (self.vm_name))
@@ -1959,7 +2011,6 @@ class VMFixture(fixtures.Fixture):
         if not result:
             self.logger.error('VM %s does not seem to be fully up' % (
                               self.vm_name))
-            self.logger.error('Console output: %s' %self.get_console_output())
             return result
         return True
     # end wait_till_vm_is_up
@@ -2169,18 +2220,18 @@ class VMFixture(fixtures.Fixture):
             self.logger.info("%s" % (stdout))
 
     def _gather_details(self):
-        self.cs_vmi_objs = self.get_vmi_obj_from_api_server()
+        self.get_vmi_objs()[1]
         self.vm_id = self.vm_objs[0].id
         self.vm_node_ip = self.get_host_of_vm()
-        inspect_h = self.agent_inspect[self.vm_node_ip]
 
         self.local_ips= self.get_local_ips()
         self.local_ip = False
+        if not self.vn_fq_names:
+            self.vn_fq_names = [':'.join(self.connections.get_project_fq_name())
+                                + ':' + x for x in self.vn_names]
         for vn_fq_name in self.vn_fq_names:
             (domain, project, vn) = vn_fq_name.split(':')
             self.tap_intf[vn_fq_name] = self.get_tap_intf_of_vmi(self.get_vmi_ids()[vn_fq_name])
-#            self.tap_intf[vn_fq_name] = inspect_h.get_vna_intf_details(
-#                self.tap_intf[vn_fq_name]['name'])[0]
             if 'Active' not in self.tap_intf[vn_fq_name]['active']:
                 self.logger.warn('VMI %s status is not active, it is %s' % (
                     self.tap_intf[vn_fq_name]['name'],

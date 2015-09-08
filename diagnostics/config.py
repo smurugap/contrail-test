@@ -9,6 +9,7 @@ from vdns_fixture import *
 class Base(object):
     def __init__(self, connections):
         self.connections = connections
+        self.verify_on_delete = False
 
     def fq_name(self, uuid=None):
         if not getattr(self, 'fixture', None):
@@ -45,7 +46,7 @@ class Project(Base):
 
     def delete(self, uuid):
         project_fixture= self.get_fixture(uuid=uuid)
-        project_fixture.delete(verify=True)
+        project_fixture.delete(verify=self.verify_on_delete)
 
     def verify(self, uuid):
         self.fixture= self.get_fixture(uuid=uuid)
@@ -65,7 +66,7 @@ class vDNS(Base):
 
     def delete(self, uuid):
         vdns_fixture = self.get_fixture(uuid=uuid)
-        vdns_fixture.delete(verify=True)
+        vdns_fixture.delete(verify=self.verify_on_delete)
 
     def verify(self, uuid):
         vdns_fixture = self.get_fixture(uuid=uuid)
@@ -90,7 +91,7 @@ class IPAM(Base):
 
     def delete(self, uuid):
         ipam_fixture = self.get_fixture(uuid=uuid)
-        ipam_fixture.delete(verify=True)
+        ipam_fixture.delete(verify=self.verify_on_delete)
 
     def verify(self, uuid):
         ipam_fixture = self.get_fixture(uuid=uuid)
@@ -119,7 +120,7 @@ class VN(Base):
         if not subnets:
             subnets = self.get_subnets(uuid)
         vn_fixture = self.get_fixture(uuid=uuid, subnets=subnets)
-        vn_fixture.delete(verify=True)
+        vn_fixture.delete(verify=self.verify_on_delete)
 
     def get_subnets(self, uuid):
         quantum_h = self.connections.get_network_h()
@@ -151,7 +152,7 @@ class VM(Base):
 
     def delete(self, uuid, vn_ids=[]):
         vm_fixture = self.get_fixture(uuid=uuid, vn_ids=vn_ids)
-        verify= True if vn_ids else False
+        verify= self.verify_on_delete if vn_ids else False
         vm_fixture.delete(verify=verify)
 
     def verify(self, uuid, vn_ids=[], username='ubuntu', password='ubuntu'):
@@ -173,6 +174,11 @@ class VM(Base):
         vm_fixture = self.get_fixture(uuid=uuid)
         vm_fixture.set_vm_creds(username, password)
         return vm_fixture.ping_to_ip(dst)
+
+    def wait_till_up(self, uuid, username='ubuntu', password='ubuntu'):
+        vm_fixture = self.get_fixture(uuid=uuid)
+        vm_fixture.set_vm_creds(username, password)
+        assert vm_fixture.wait_till_vm_is_up(), 'VM didnt come up'
 
     def copy_file_to_vm(self, uuid, localfile, dst='/tmp/',
                         username='ubuntu', password='ubuntu'):
@@ -220,7 +226,7 @@ class FloatingIPPool(Base):
 
     def delete(self, uuid):
         fip_fixture = self.get_fixture(uuid=uuid)
-        fip_fixture.delete(verify=True)
+        fip_fixture.delete(verify=self.verify_on_delete)
 
     def associate_fip(self, uuid, vm_id, vm_connections,
                       username='ubuntu', password='ubuntu'):
@@ -228,6 +234,7 @@ class FloatingIPPool(Base):
         tcpserver = os.path.join(os.path.abspath(os.path.dirname(__file__)),
                                  '../', 'tcutils', 'tcpechoserver.py')
         vm = VM(vm_connections)
+        vm.wait_till_up(vm_id, username, password)
         vm.copy_file_to_vm(vm_id, tcpserver, '/tmp/', username, password)
         cmd = 'python /tmp/tcpechoserver.py'
         vm.run_cmd(vm_id, cmd, sudo=True, daemon=True)

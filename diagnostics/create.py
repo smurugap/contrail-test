@@ -1,4 +1,5 @@
 import sys
+import yaml
 import string
 import argparse
 from tcutils.cfgparser import parse_cfg_file
@@ -43,26 +44,25 @@ class create(object):
     def setup(self):
 
 # Create vDNS
-        vdns_id = self.args.vdns
+        vdns_id = self.args.vdns_id
         vdns_obj = vDNS(self.connections)
         vdns_fqname = None
         if self.args.create_vdns:
-            vdns_id = vdns_obj.create(random_string('vDNS'))
+            vdns_id = vdns_obj.create(self.args.vdns_name)
         if vdns_id:
             vdns_fqname = vdns_obj.fq_name(vdns_id)
             self.db.set_vdns_id(vdns_fqname, vdns_id)
 
 # Create Public Network in case of dNAT or sNAT
         if self.args.n_fips or self.args.create_snat or self.args.router_id:
-            name = self.args.public_vn or random_string('Public')
             vn_obj = VN(self.connections)
-            self.public_vn_id = vn_obj.create(name, external=True)
+            self.public_vn_id = vn_obj.create(self.args.public_vn, external=True)
             vn_subnets = vn_obj.get_subnets(self.public_vn_id)
             self.db.add_virtual_network(vn_obj.fq_name(), self.public_vn_id, vn_subnets)
 
 # Create Tenant
-        for tenant_index in range(int(self.args.n_tenants)):
-            self.tenant_name = self.args.tenant or random_string(self.args.tenant_prefix)
+        for tenant_index in range(1):
+            self.tenant_name = self.args.tenant
             tenant_obj = Project(self.connections)
             tenant_id = tenant_obj.create(self.tenant_name)
             tenant_obj.update_default_sg()
@@ -71,7 +71,7 @@ class create(object):
             self.uuid[self.tenant_name] = UUID()
 
 # Create IPAM
-            ipam_id = self.args.ipam
+            ipam_id = self.args.ipam_id
             ipam_obj = IPAM(tenant_connections)
             if self.args.create_ipam:
                 ipam_id = ipam_obj.create(self.get_name('ipam'), vdns_id)
@@ -162,14 +162,21 @@ class UUID(object):
         self.vn_id = dict()
         self.vm_id = dict()
 
+def update_args(yaml_args, cli_args):
+    for key in cli_args.keys():
+        if cli_args.get(key, None):
+            yaml_args[key] = cli_args[key]
+    return yaml_args
+
 def validate_args(args):
     for key, value in args.__dict__.iteritems():
-        if value == 'None':
-            args.__dict__[key] = None
-        if value == 'False':
-            args.__dict__[key] = False
-        if value == 'True':
-            args.__dict__[key] = True
+        if type(value) is str:
+            if value.lower() == 'none':
+                args.__dict__[key] = None
+            if value.lower() == 'false':
+                args.__dict__[key] = False
+            if value.lower() == 'true':
+                args.__dict__[key] = True
 
     if args.vn_name and not args.tenant:
         raise Exception('Need tenant name too. use --tenant <tenant_name>')
@@ -194,14 +201,28 @@ def validate_args(args):
         raise Exception('n_fips cant be greater than (n_tenants * n_vms * n_vns)')
     if args.n_vms and not args.image:
         raise Exception('n_vms needs image name, please specify --image <image_name>')
-    if not args.tenant_prefix:
-        args.tenant_prefix = 'TestProject'
 
 def parse_cli(args):
     '''Define and Parse arguments for the script'''
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--tenant_prefix', default=None,
-                        help='tenant prefix for auto generated tenants [TestProject]')
+    parser.add_argument('--testbed_file', default=None,
+                        help='Specify testbed ini file', metavar="FILE")
+    parser.add_argument('--db_file', default=None,
+                        help='Specify database file', metavar="FILE")
+
+    parser.add_argument('--tenant', default=None,
+                        help='Tenant name []')
+    parser.add_argument('--public_vn', default=None,
+                        help='Name of public network')
+    parser.add_argument('--vdns_id', default=None,
+                        help='UUID of virtual DNS')
+    parser.add_argument('--ipam_id', default=None,
+                        help='IPAM UUID')
+    parser.add_argument('--router_id', default=None,
+                        help='UUID of Logical Router(snat)')
+    parser.add_argument('--vn_name', default=None,
+                        help='Name of virtual network')
+
     parser.add_argument('--image', default=None,
                         help='Image Name [None]')
     parser.add_argument('--n_tenants', default=0, type=int,
@@ -212,60 +233,85 @@ def parse_cli(args):
                         help='No of VMs to create per VN [0]')
     parser.add_argument('--n_fips', default=0, type=int,
                         help='No of Floating-IPs to create [0]')
-    parser.add_argument('--create_vdns', action='store_true',
-                        help='Knob to create and associate vdns')
-    parser.add_argument('--create_ipam', action='store_true',
-                        help='Knob to create and associate ipam')
-    parser.add_argument('--create_snat', action='store_true',
-                        help='Knob to create and associate Logical Router')
 
-    parser.add_argument('--testbed_file', default=None,
-                        help='Specify testbed ini file', metavar="FILE")
-    parser.add_argument('--db_file', default=None,
-                        help='Specify database file', metavar="FILE")
-
-    parser.add_argument('--tenant', default=None,
-                        help='Tenant name []')
-    parser.add_argument('--public_vn', default=None,
-                        help='Name of public network')
-    parser.add_argument('--vn_name', default=None,
-                        help='Name of virtual network')
-    parser.add_argument('--vdns', default=None,
-                        help='UUID of virtual DNS')
-    parser.add_argument('--ipam', default=None,
-                        help='IPAM UUID')
-    parser.add_argument('--router_id', default=None,
-                        help='UUID of Logical Router(snat)')
-
-    return dict(parser.parse_known_args(args)[0]._get_kwargs())
-
-# CLI params override params defined in ini file
-def update_args(ini_args, cli_args):
-    for key in cli_args.keys():
-        if cli_args[key]:
-            ini_args[key] = cli_args[key]
-    return ini_args
+    args = dict(parser.parse_known_args(args)[0]._get_kwargs())
+    if args['vdns_id'] and args['vdns_id'].lower() == 'true':
+        args['vdns_id'] = True
+    if args['router_id'] and args['router_id'].lower() == 'true':
+        args['router_id'] = True
+    if args['ipam_id'] and args['ipam_id'].lower() == 'true':
+        args['ipam_id'] = True
+    if args['public_vn'] and args['public_vn'].lower() == 'true':
+        args['public_vn'] = True
+    return create_per_tenant_args(args['tenant'], dict(), dict(), args)
 
 class Struct(object):
     def __init__(self, entries):
         self.__dict__.update(entries)
 
+def create_per_tenant_args(name, default_args, global_args, tenant_args=None):
+    tenant = default_args.copy()
+    if tenant_args:
+        tenant.update(tenant_args)
+        populate_args(tenant)
+    tenant['tenant'] = name
+    tenant.update(global_args)
+    return tenant
+
+def populate_args(args):
+    args['create_vdns'] = False
+    args['create_snat'] = False
+    args['create_ipam'] = False
+    if args['vdns_id'] == True:
+        args['create_vdns'] = True
+        args['vdns_name'] = random_string('vDNS')
+    if args['router_id'] == True:
+        args['create_snat'] = True
+    if args['ipam_id'] == True:
+        args['create_ipam'] = True
+    if args['public_vn'] == True:
+        args['public_vn'] = random_string('Public')
+    if (args['router_id'] or args['n_fips']) and not args['public_vn']:
+        args['public_vn'] = random_string('Public')
+    args['n_vns'] = args['n_vns'] if args['n_vns'] else 0
+    args['n_vms'] = args['n_vms'] if args['n_vms'] else 0
+    args['n_fips'] = args['n_fips'] if args['n_fips'] else 0
+
+def parse_yaml(conf, cli_args):
+    config = yaml.load(open(conf, 'r'))
+    if cli_args:
+        update_args(config['default'], cli_args)
+    n_tenants = config['default'].get('n_tenants', 0) or 0
+    pargs = dict()
+    populate_args(config['default'])
+    for index in range(n_tenants):
+        name = (config['default']['name'] or 'TestProject') + str(index)
+        pargs[name] = create_per_tenant_args(name, config['default'],
+                                             config['global'])
+    for entry in config['tenant']:
+        name = entry.keys()[0]
+        pargs[name] = create_per_tenant_args(name, config['default'],
+                                             config['global'], entry[name])
+    if cli_args['tenant'] in pargs.keys():
+        update_args(pargs[name], cli_args)
+    return pargs
+
 def main():
     signal.signal(signal.SIGTERM, sig_handler)
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("-i", "--ini_file", help="Specify conf file", metavar="FILE")
-    args, remaining_argv = parser.parse_known_args(sys.argv[1:])
+    parser.add_argument("-c", "--config", help="Specify conf file", metavar="FILE")
+    pargs, remaining_argv = parser.parse_known_args(sys.argv[1:])
     cli_args = parse_cli(remaining_argv)
-    if args.ini_file:
-        ini_args = parse_cfg_file(args.ini_file)
-        args = update_args(ini_args['TEST'], cli_args)
-        args.update(update_args(ini_args['DEFAULTS'], cli_args))
+    if pargs.config:
+        args = parse_yaml(pargs.config, cli_args)
     else:
-        args = cli_args
-    args = Struct(args)
-    validate_args(args)
-    obj = create(args)
-    obj.setup()
+        args = {None: cli_args}
+
+    for key, tenant in args.iteritems():
+        tenant_args = Struct(tenant)
+        validate_args(tenant_args)
+        obj = create(tenant_args)
+        obj.setup()
 
 if __name__ == "__main__":
     main()

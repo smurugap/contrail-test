@@ -87,7 +87,7 @@ class KeystoneCommands():
         try:
             self.keystone.tenants.add_user(tenant, user, role)
         except ks_exceptions.Conflict as e:
-            LOG.info(str(e))
+            LOG.logger.info(str(e))
 
     def remove_user_from_tenant(self, tenant, user, role):
 
@@ -153,7 +153,7 @@ class KeystoneCommands():
         except ks_exceptions.ClientException, e:
             # TODO Remove this workaround
             if 'Unable to add token to revocation list' in str(e):
-                LOG.warn('Exception %s while deleting user' % (
+                LOG.logger.warn('Exception %s while deleting user' % (
                     str(e)))
                 return False
     # end delete_user

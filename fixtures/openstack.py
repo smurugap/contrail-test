@@ -49,6 +49,7 @@ class OpenstackOrchestrator(Orchestrator):
        return self.nova_h.get_nova_host_of_vm(vm_obj)
 
    def get_networks_of_vm(self, vm_obj):
+       vm_obj.get()
        return vm_obj.networks.keys()
 
    def wait_till_vm_is_active(self, vm_obj):

@@ -166,7 +166,6 @@ def copy_fabfile_to_agent():
     dst = '~/fabfile'
     global fab_copied_to_hosts
     if not env.host_string in fab_copied_to_hosts:
-        print env.host_string
         if not exists(dst):
             put(src, dst)
         fab_copied_to_hosts.append(env.host_string)
