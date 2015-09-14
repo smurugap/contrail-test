@@ -9,7 +9,7 @@ from vdns_fixture import *
 class Base(object):
     def __init__(self, connections):
         self.connections = connections
-        self.verify_on_delete = False
+        self.verify_on_delete = True
 
     def fq_name(self, uuid=None):
         if not getattr(self, 'fixture', None):
@@ -173,7 +173,7 @@ class VM(Base):
     def ping(self, uuid, dst, username='ubuntu', password='ubuntu'):
         vm_fixture = self.get_fixture(uuid=uuid)
         vm_fixture.set_vm_creds(username, password)
-        return vm_fixture.ping_to_ip(dst)
+        return vm_fixture.ping_to_ip(dst, count=3)
 
     def wait_till_up(self, uuid, username='ubuntu', password='ubuntu'):
         vm_fixture = self.get_fixture(uuid=uuid)
@@ -299,14 +299,16 @@ class LogicalRouter(Base):
         quantum_h = self.connections.get_network_h()
         quantum_h.router_gateway_clear(uuid)
 
-    def attach_vn(self, uuid, vn_id):
+    def attach_vn(self, uuid, vn_id=None, subnet_id=None):
         quantum_h = self.connections.get_network_h()
-        subnet_id = quantum_h.get_vn_obj_from_id(vn_id)['network']['subnets'][0]
+        if not subnet_id and vn_id:
+            subnet_id = quantum_h.get_vn_obj_from_id(vn_id)['network']['subnets'][0]
         quantum_h.add_router_interface(router_id=uuid, subnet_id=subnet_id)
 
-    def detach_vn(self, uuid, vn_id):
+    def detach_vn(self, uuid, vn_id=None, subnet_id=None):
         quantum_h = self.connections.get_network_h()
-        subnet_id = quantum_h.get_vn_obj_from_id(vn_id)['network']['subnets'][0]
+        if not subnet_id and vn_id:
+            subnet_id = quantum_h.get_vn_obj_from_id(vn_id)['network']['subnets'][0]
         quantum_h.delete_router_interface(router_id=uuid, subnet_id=subnet_id)
 
     def delete(self, uuid):
@@ -315,6 +317,13 @@ class LogicalRouter(Base):
         for port in ports:
             quantum_h.delete_router_interface(router_id=uuid, port_id=port['id'])
         quantum_h.delete_router(uuid)
+
+    def list_subnets(self, uuid):
+        quantum_h = self.connections.get_network_h()
+        subnets = list()
+        for ports in quantum_h.get_router_interfaces(uuid):
+            subnets.append(port['fixed_ips']['subnet_id'])
+        return subnets
 
     def uuid(self):
         return self.uuid
