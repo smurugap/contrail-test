@@ -196,7 +196,7 @@ def parse_cli(args):
     parser.add_argument('--password', default=None,
                         help='VM password - required if vm_id is specified')
 
-    parser.add_argument('--destination', default=None,
+    parser.add_argument('--destination', default=None, nargs='+',
                         help='Destination IP of the traffic')
     parser.add_argument('--dport', default=None,
                         help='Destination port of the traffic')
