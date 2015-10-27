@@ -28,6 +28,7 @@ class TestDB(object):
             self.orig_db['vdns'] = self.db.get('vdns', {})
             self.orig_db['fip-pool'] = self.db.get('fip-pool', {})
             self.orig_db['logical_router'] = self.db.get('logical_router', {})
+            self.orig_db['load_balancer'] = self.db.get('load_balancer', {})
         self.orig_db.close()
 
     def read(f):
@@ -200,10 +201,13 @@ class TestDB(object):
 
     @write
     def delete_virtual_network(self, fqname):
+      try:
         fqname = fqname_to_str(fqname)
         proj = self.get_project_dict(fqname_to_str(':'.join(fqname.split(':')[:-1])))
         if fqname in proj['virtual-networks']:
             del proj['virtual-networks'][fqname]
+      except:
+        pass
 
     @write
     def add_lr_to_vn(self, fqname, router_id):
@@ -408,8 +412,9 @@ class TestDB(object):
     @write
     def delete_vn_from_lr(self, fqname, vn_id):
         logical_router = self.get_logical_router_dict(fqname_to_str(fqname))
-        if 'vns' not in logical_router:
+        if 'vns' not in logical_router or vn_id not in logical_router['vns']:
             return
+        logical_router['vns'].remove(vn_id)
 
     @write
     def get_gw_of_lr(self, fqname):
@@ -427,16 +432,115 @@ class TestDB(object):
         if 'gw' in logical_router:
             del logical_router['gw']
 
+    def get_load_balancer_dict(self, fqname):
+        if 'load_balancer' not in self.db:
+            self.db['load_balancer'] = dict()
+        if fqname not in self.db['load_balancer']:
+            raise Exception('Load balancer %s not found in db'%fqname)
+        return self.db['load_balancer'][fqname]
+
+    @write
+    def add_load_balancer(self, fqname, uuid):
+        fqname = fqname_to_str(fqname)
+        try:
+            self.get_load_balancer_dict(fqname)
+        except:
+            self.db['load_balancer'][fqname] = dict()
+        self.db['load_balancer'][fqname]['uuid'] = uuid
+
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        load_balancer['uuid'] = uuid
+
+    @write
+    def delete_load_balancer(self, fqname):
+        fqname = fqname_to_str(fqname)
+        if fqname in self.db['load_balancer']:
+            del self.db['load_balancer'][fqname]
+
+    @read
+    def get_load_balancer_id(self, fqname):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        return load_balancer['uuid']
+
+    @write
+    def set_vip_to_lb(self, fqname, vip_id):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        load_balancer['vip'] = vip_id
+
+    @write
+    def clear_vip_from_lb(self, fqname):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        if 'vip' in load_balancer:
+            del load_balancer['vip']
+
+    @read
+    def get_vip_of_lb(self, fqname):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        return load_balancer.get('vip', None)
+
+    @write
+    def set_fip_on_vip(self, fqname, fip):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        load_balancer['fip'] = fip
+
+    @write
+    def clear_fip_on_vip(self, fqname):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        if 'fip' in load_balancer:
+            del load_balancer['fip']
+
+    @read
+    def get_fip_on_vip(self, fqname):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        return load_balancer.get('fip', None)
+
+    @write
+    def add_member_to_lb(self, fqname, member_id):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        if 'members' not in load_balancer:
+            load_balancer['members'] = list()
+        load_balancer['members'].append(member_id)
+        load_balancer['members'] = list(set(load_balancer['members']))
+
+    @write
+    def delete_member_from_lb(self, fqname, member_id):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        if 'members' not in load_balancer or member_id not in load_balancer['members']:
+            return
+        load_balancer['members'].remove(member_id)
+
+    @read
+    def get_members_of_lb(self, fqname):
+        load_balancer = self.get_load_balancer_dict(fqname_to_str(fqname))
+        return load_balancer.get('members', [])
+
+    @read
+    def list_load_balancer(self):
+        return self.db['load_balancer'].keys()
+
     @read
     def dump(self):
         print self.db
 
 def main():
 #    db = TestDB('db.1')
-    db = TestDB('/var/tmp/db.test')
-    db.dump()
-    import pdb; pdb.set_trace()
+    db = TestDB('/root/test.db.scale.load_balance')
+#    db.dump()
+#    l = list()
+#    for entry in db.list_logical_routers():
+#        router_name = entry.split(':')[2]
+#        if router_name in l:
+#            import pdb; pdb.set_trace()
+#        print router_name
+#        l.append(router_name)
+#        if db.get_logical_router_id(entry) == '22c7f61b-aec3-4787-9dbf-98bee9f030fc':
+#            import pdb; pdb.set_trace()
+    for entry in db.list_fip_pools():
+        print entry
+        fips = db.get_fips(entry)
+        import pdb; pdb.set_trace()
     exit(0)
+    db.delete_project('default-domain:TestProject-LBaas')
     db.set_project_id('default-domain:db-test', 123)
     print db.get_project_id('default-domain:db-test')
     db.add_virtual_network('default-domain:db-test:db-vn', 1234)

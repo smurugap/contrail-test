@@ -9,7 +9,7 @@ from vdns_fixture import *
 class Base(object):
     def __init__(self, connections):
         self.connections = connections
-        self.verify_on_delete = True
+        self.verify_on_delete = False
 
     def fq_name(self, uuid=None):
         if not getattr(self, 'fixture', None):
@@ -93,6 +93,13 @@ class IPAM(Base):
         ipam_fixture = self.get_fixture(uuid=uuid)
         ipam_fixture.delete(verify=self.verify_on_delete)
 
+    def update(self, uuid, vdns_id):
+        if vdns_id:
+            vnc = self.connections.get_vnc_lib_h().get_handle()
+            vdns_obj = vnc.virtual_DNS_read(id=vdns_id)
+            self.fixture = self.get_fixture(uuid=uuid)
+            self.fixture.update_vdns(vdns_obj)
+
     def verify(self, uuid):
         ipam_fixture = self.get_fixture(uuid=uuid)
         assert ipam_fixture.verify_on_setup()
@@ -125,6 +132,7 @@ class VN(Base):
     def get_subnets(self, uuid):
         quantum_h = self.connections.get_network_h()
         return quantum_h.get_subnets_of_vn(uuid)
+        return list(map(lambda x: x['id'], quantum_h.get_subnets_of_vn(uuid)))
 
     def verify(self, uuid, subnets=[]):
         if not subnets:
@@ -142,7 +150,7 @@ class VN(Base):
 class VM(Base):
     def create(self, name, vn_ids, image='ubuntu'):
         self.fixture = VMFixture(connections=self.connections, vn_ids=vn_ids,
-                                 vm_name=name, image_name=image)
+                                 vm_name=name, image_name=image, node_name='disable')
         self.fixture.setUp()
         return self.fixture.get_uuid()
 
@@ -163,7 +171,7 @@ class VM(Base):
     def vm_ip(self, uuid, vn_name=None):
         orch_h = self.connections.get_orch_h()
         vm_obj = orch_h.get_vm_by_id(vm_id=uuid)
-        return orch_h.get_vm_ip(vm_obj, vn_name)[0]
+        return orch_h.get_vm_ip(vm_obj, vn_name)[0][0]
 
     def vm_name(self, uuid):
         orch_h = self.connections.get_orch_h()
@@ -196,6 +204,7 @@ class VM(Base):
     def tcpecho(self, uuid, dst, dport=50000,
                 username='ubuntu', password='ubuntu'):
         vm_fixture = self.get_fixture(uuid=uuid)
+        vm_fixture.set_vm_creds(username, password)
         tcpclient = os.path.join(os.path.abspath(os.path.dirname(__file__)),
                                  '../', 'tcutils', 'tcpechoclient.py')
         self.copy_file_to_vm(uuid, tcpclient, '/tmp/',
@@ -212,6 +221,23 @@ class VM(Base):
             print output[cmd]
             assert False, 'TCP Echo failure'
         return True
+
+    def curl(self, uuid, dst, username='ubuntu', password='ubuntu', port=8000):
+        vm_fixture = self.get_fixture(uuid=uuid)
+        vm_fixture.set_vm_creds(username, password)
+        cmd = 'curl -s http://%s:%d'%(dst, port)
+        output = vm_fixture.run_cmd_on_vm(cmds=[cmd])[cmd]
+        return output.strip() if output else output
+
+    def web_server(self, uuid, username='ubuntu', password='ubuntu', port=8000):
+        vm_fixture = self.get_fixture(uuid=uuid)
+        vm_fixture.set_vm_creds(username, password)
+        vm_fixture.wait_for_ssh_on_vm()
+        ip = self.vm_ip(uuid)
+        cmd = 'echo %s >& index.html'%ip
+        self.run_cmd(uuid, cmd)
+        cmd = 'python -m SimpleHTTPServer %d &> /dev/null '%port
+        self.run_cmd(uuid, cmd, daemon=True)
 
     def run_cmd(self, uuid, cmd, sudo=False, daemon=False):
         vm_fixture = self.get_fixture(uuid)
@@ -337,3 +363,94 @@ class LogicalRouter(Base):
             self.fqname = router_obj['contrail:fq_name']
         return self.fqname
 
+class LoadBalancer(Base):
+    def create(self, name, lb_method='ROUND_ROBIN', protocol='HTTP',
+               port=8000, subnet=None, members=[], vip_name=None, vip_ip=None, vip_subnet=None):
+        quantum_h = self.connections.get_network_h()
+        response = quantum_h.create_lb_pool(name, lb_method, protocol, subnet)
+        self.uuid = response['id']
+        try:
+            self.create_lb_members(members, port, self.uuid)
+        except:
+#            self.delete_lb_members(self.get_lb_members(self.uuid))
+#            self.delete(self.uuid)
+#            return None
+             pass
+        if vip_name:
+            if not vip_subnet:
+                vip_subnet = subnet
+            self.create_vip(vip_name, vip_subnet, self.uuid, protocol, port, vip_ip)
+        return self.uuid
+
+    def delete(self, uuid):
+        quantum_h = self.connections.get_network_h()
+        quantum_h.delete_lb_pool(uuid)
+
+    def get_lb_members(self, uuid):
+        quantum_h = self.connections.get_network_h()
+        return [x['id'] for x in quantum_h.list_lb_members(pool_id=uuid, fields='id')]
+
+    def create_lb_members(self, members, port, pool_id):
+        quantum_h = self.connections.get_network_h()
+        member_ids = list()
+        for member in members:
+            obj = quantum_h.create_lb_member(member, port, pool_id)
+            member_ids.append(obj['id'])
+        return member_ids
+
+    def delete_lb_members(self, members):
+        quantum_h = self.connections.get_network_h()
+        for member in members:
+            quantum_h.delete_lb_member(member)
+
+    def get_lb_member_ip(self, member):
+        quantum_h = self.connections.get_network_h()
+        return quantum_h.show_lb_member(member)['address']
+
+    def create_vip(self, name, subnet, pool_id, protocol='HTTP', port=8000, vip_ip=None):
+        quantum_h = self.connections.get_network_h()
+        return quantum_h.create_vip(name, protocol, port, subnet, pool_id, vip_ip)['id']
+
+    def delete_vip(self, uuid=None, name=None):
+        quantum_h = self.connections.get_network_h()
+        if not uuid:
+            if name:
+                uuid = quantum_h.list_vips(name=name, fields='id')[0]['id']
+        if uuid:
+            quantum_h.delete_vip(uuid)
+
+    def get_vip_ip(self, uuid=None, name=None):
+        quantum_h = self.connections.get_network_h()
+        if uuid:
+            return quantum_h.list_vips(id=uuid, fields='address')[0]['address']
+        if not name:
+            return None
+        return quantum_h.list_vips(name=name, fields='address')[0]['address']
+
+    def get_vip_id(self, name):
+        quantum_h = self.connections.get_network_h()
+        return quantum_h.list_vips(name=name, fields='id')[0]['id']
+
+    def get_vip_port_id(self, uuid):
+        quantum_h = self.connections.get_network_h()
+        return quantum_h.list_vips(id=uuid, fields='port_id')[0]['port_id']
+
+    def get_vip_subnet_id(self, uuid):
+        quantum_h = self.connections.get_network_h()
+        return quantum_h.show_vip(uuid, fields='subnet_id')['subnet_id']
+
+    def get_pool_subnet_id(self, uuid):
+        quantum_h = self.connections.get_network_h()
+        return quantum_h.get_lb_pool(uuid, fields='subnet_id')['pool']['subnet_id']
+
+    def uuid(self):
+        return self.uuid
+
+    def fq_name(self, uuid=None):
+        if not getattr(self, 'fqname', None):
+            if not uuid:
+                assert False, 'uuid has to be specified'
+            quantum_h = self.connections.get_network_h()
+            obj = quantum_h.get_lb_pool(uuid)['pool']
+            self.fqname = self.connections.get_project_fq_name() + [obj['name']]
+        return self.fqname

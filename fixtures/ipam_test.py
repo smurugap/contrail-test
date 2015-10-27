@@ -87,6 +87,14 @@ class IPAMFixture(fixtures.Fixture):
                     break
         # end setup
 
+    def update_vdns(self, vdns_obj):
+        self.obj = self.vnc.network_ipam_read(id=self.ipam_id)
+        vdns_server = IpamDnsAddressType(virtual_dns_server_name=vdns_obj.get_fq_name_str())
+        ipam_mgmt_obj = IpamType(ipam_dns_method='virtual-dns-server', ipam_dns_server=vdns_server)
+        self.obj.set_network_ipam_mgmt(ipam_mgmt_obj)
+        self.obj.add_virtual_DNS(vdns_obj)
+        self.vnc.network_ipam_update(self.obj)
+
     def get_uuid(self):
         return self.ipam_id
 
