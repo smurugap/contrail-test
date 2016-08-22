@@ -22,7 +22,7 @@ class NovaHelper():
                  project_name,
                  key='key1',
                  username=None,
-                 password=None):
+                 password=None,update_ssh_key=True):
         httpclient = None
         self.inputs = inputs
         self.username = username or inputs.stack_user
@@ -30,6 +30,7 @@ class NovaHelper():
         self.project_name = project_name
         self.cfgm_ip = inputs.cfgm_ip
         self.openstack_ip = inputs.openstack_ip
+        self.update_ssh_key=update_ssh_key
         # 1265563 keypair name can only be alphanumeric. Fixed in icehouse
         self.key = self.username+key
         self.obj = None
@@ -57,13 +58,16 @@ class NovaHelper():
                                        insecure=insecure,
                                        endpoint_type=self.endpoint_type
                       )
+
+        #if self.update_ssh_key:
         try:
-            f = '/tmp/key%s'%self.inputs.stack_user
-            lock = Lock(f)
-            lock.acquire()
-            self._create_keypair(self.key)
+          f = '/tmp/key%s'%self.inputs.stack_user
+          lock = Lock(f)
+          lock.acquire()
+          print "Note: Skipping keypair create"
+          self._create_keypair(self.key)
         finally:
-            lock.release()
+          lock.release()
         self.compute_nodes = self.get_compute_host()
         self.zones = self._list_zones()
         self.hosts = self._list_hosts()
@@ -107,12 +111,18 @@ class NovaHelper():
 
     def find_image(self, image_name):
         got_image = None
-        images_list = self.obj.images.list()
-        for image in images_list:
-            if image.name == image_name:
-                (rv, got_image) = self.check_if_image_active(image.id)
-                if rv is True:
-                   return got_image
+        for i in xrange(10):
+          try:
+            images_list = self.obj.images.list()
+            print "images",images_list
+            for image in images_list:
+                if image.name == image_name:
+                   (rv, got_image) = self.check_if_image_active(image.id)
+                   print rv,got_image
+                   if rv is True:
+                      return got_image
+          except:
+            time.sleep(10)
         # end for
         if not got_image:
             self.logger.debug('Image by name %s either not found or not active'%
@@ -139,7 +149,10 @@ class NovaHelper():
 
     def get_vm_if_present(self, vm_name=None, project_id=None, vm_id=None):
         try:
-            vm_list = self.obj.servers.list(search_opts={"all_tenants": True})
+            search_opt_dict = {"all_tenants": True}
+            if project_id:
+               search_opt_dict['tenant_id'] = self.strip(project_id)
+            vm_list = self.obj.servers.list(search_opts=search_opt_dict)
             for vm in vm_list:
                 if project_id and vm.tenant_id != self.strip(project_id):
                     continue
@@ -378,14 +391,15 @@ class NovaHelper():
             if not zone:
                 zone = 'nova'
             if zone not in self.zones:
-                raise RuntimeError("Zone %s is not available" % zone)
+                raise RuntimeError("Zone %s is not available,%s" %( zone,self.zones))
             if not len(self.hosts[zone]):
                 raise RuntimeError("Zone %s doesnt have any computes" % zone)
-            while(True):
-                (node_name, node_zone)  = next(self.compute_nodes)
-                if node_zone == zone:
-                    zone = node_zone + ":" + node_name
-                    break
+
+            #while(True):
+            #    (node_name, node_zone)  = next(self.compute_nodes)
+            #    if node_zone == zone:
+            #        zone = node_zone + ":" + node_name
+            #        break
 
         if userdata:
             with open(userdata) as f:
@@ -473,7 +487,10 @@ class NovaHelper():
 
         '''
         final_vm_list = []
-        vm_list = self.obj.servers.list(search_opts={"all_tenants": True})
+        search_opt_dict = {"all_tenants": True}
+        if project_id:
+           search_opt_dict['tenant_id'] = self.strip(project_id)
+        vm_list = self.obj.servers.list(search_opts=search_opt_dict)
         for vm_obj in vm_list:
             match_obj = re.match(r'%s' %
                                  name_pattern, vm_obj.name, re.M | re.I)

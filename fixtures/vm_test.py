@@ -149,7 +149,8 @@ class VMFixture(fixtures.Fixture):
 
     def setUp(self):
         super(VMFixture, self).setUp()
-        self.vn_ids = [self.orch.get_vn_id(x) for x in self.vn_objs]
+        if not self.vn_ids:
+           self.vn_ids = [self.orch.get_vn_id(x) for x in self.vn_objs]
         self.vm_obj = self.orch.get_vm_if_present(
                 self.vm_name, project_id = self.project_id)
         if self.vm_obj:
@@ -171,6 +172,7 @@ class VMFixture(fixtures.Fixture):
                     flavor=self.flavor,
                     vm_name=self.vm_name,
                     vn_objs=self.vn_objs,
+                    vn_ids=self.vn_ids,
                     node_name=self.node_name,
                     zone=self.zone,
                     sg_ids=self.sg_ids,

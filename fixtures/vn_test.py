@@ -38,7 +38,7 @@ class VNFixture(fixtures.Fixture):
         vn_fixture.vn_name  : Name of the VN
         vn_fixture.vn_fq_name : FQ name of the VN
     '''
-    def __init__(self, connections, inputs=None, vn_name=None, policy_objs=[], subnets=[], project_name=None, router_asn='64512', rt_number=None, ipam_fq_name=None, option='quantum', forwarding_mode=None, vxlan_id=None, shared=False, router_external=False, clean_up=True, project_obj= None, af=None, empty_vn=False, enable_dhcp=True, dhcp_option_list=None, disable_gateway=False, uuid=None):
+    def __init__(self, connections, inputs=None, vn_name=None, policy_objs=[], subnets=[], project_name=None, router_asn='64512', rt_number=None, ipam_fq_name_list=[], option='quantum', forwarding_mode=None, vxlan_id=None, shared=False, router_external=False, clean_up=True, project_obj= None, af=None, empty_vn=False, enable_dhcp=True, dhcp_option_list=None, disable_gateway=False, uuid=None):
         self.connections = connections
         self.inputs = connections.inputs
         self.orch = self.connections.get_orch_h()
@@ -68,17 +68,17 @@ class VNFixture(fixtures.Fixture):
         self.ri_name = self.vn_fq_name + ':' + self.vn_name
         if self.inputs.orchestrator == 'vcenter' and subnets and (len(subnets) != 1):
            raise Exception('vcenter: Multiple subnets not supported')
-        if not subnets and not empty_vn:
-            subnets = get_random_cidrs(stack=self.af)
-        if subnets and self.get_af_from_subnet(subnets=subnets) == 'v6':
-            subnets.extend(get_random_cidrs(stack='v4'))
+        #if not subnets and not empty_vn:
+        #    subnets = get_random_cidrs(stack=self.af)
+        #if subnets and self.get_af_from_subnet(subnets=subnets) == 'v6':
+        #   subnets.extend(get_random_cidrs(stack='v4'))
         self.vn_subnets = subnets
         if self.inputs.verify_thru_gui():
             self.browser = self.connections.browser
             self.browser_openstack = self.connections.browser_openstack
             self.webui = WebuiTest(self.connections, self.inputs)
         self.project_id = self.connections.get_project_id()
-        self.ipam_fq_name = ipam_fq_name or NetworkIpam().get_fq_name()
+        self.ipam_fq_name_list = ipam_fq_name_list or NetworkIpam().get_fq_name()
         self.policy_objs = policy_objs
         self.logger = self.inputs.logger
         self.already_present = False
@@ -150,7 +150,7 @@ class VNFixture(fixtures.Fixture):
             if not self.obj:
                 self.obj = self.orch.create_vn(self.vn_name,
                                                self.vn_subnets,
-                                               ipam_fq_name=self.ipam_fq_name,
+                                               ipam_fq_name_list=self.ipam_fq_name_list,
                                                shared=self.shared,
                                                router_external=self.router_external,
                                                enable_dhcp=self.enable_dhcp,

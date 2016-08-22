@@ -629,6 +629,6 @@ class custom_dict(dict):
             return dict.__getitem__(self, key)
 
     def __setitem__(self, key, value):
-        if self.validate_set:
+        if self.has_key('validate_set'):
             self.validate_set(key, value)
         dict.__setitem__(self, key, value)

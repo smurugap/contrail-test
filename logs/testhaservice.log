@@ -1,0 +1,14 @@
+2015-10-06 09:26:56,822 - DEBUG - COMMAND: (release=`apt-cache show contrail-install-packages | grep Version | grep -o "[0-9\.]*" | head -1` ; source /opt/contrail/contrail_packages/VERSION; echo ${release}-${BUILDID})
+2015-10-06 09:26:57,004 - DEBUG - 2.21-97
+2015-10-06 09:26:57,588 - DEBUG - COMMAND: (cat /etc/contrail/mysql.token)
+2015-10-06 09:26:57,684 - DEBUG - f5660ba22baf20af682a
+2015-10-06 09:26:58,579 - INFO - Project TestHAService-76639376 not found, creating it
+2015-10-06 09:26:58,584 - INFO - Proceed with creation of new project.
+2015-10-06 09:26:58,656 - INFO - Created Project:TestHAService-76639376, ID : c1c6f7ff-459b-46ab-8f17-d49f9acf0ee7 
+2015-10-06 09:27:08,371 - DEBUG - COMMAND: (release=`apt-cache show contrail-install-packages | grep Version | grep -o "[0-9\.]*" | head -1` ; source /opt/contrail/contrail_packages/VERSION; echo ${release}-${BUILDID})
+2015-10-06 09:27:08,536 - DEBUG - 2.21-97
+2015-10-06 09:27:08,591 - DEBUG - COMMAND: (cat /etc/contrail/mysql.token)
+2015-10-06 09:27:08,693 - DEBUG - f5660ba22baf20af682a
+2015-10-06 09:27:10,106 - DEBUG - Creating keypair
+2015-10-06 09:27:10,659 - DEBUG - Public key exists. Getting public key
+2015-10-06 09:27:10,822 - DEBUG - Reading publick key

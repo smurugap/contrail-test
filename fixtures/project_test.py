@@ -13,6 +13,7 @@ from tcutils.util import retry
 from time import sleep
 from openstack import OpenstackAuth
 from vcenter import VcenterAuth
+from security_group import SecurityGroupFixture,get_secgrp_id_from_name
 
 
 class ProjectFixture(fixtures.Fixture):
@@ -60,7 +61,28 @@ class ProjectFixture(fixtures.Fixture):
             self.project_obj = self.vnc_lib_h.project_read(id=self.uuid)
             return
 
+        self.connections.inputs.domain_name = self.domain_name
+        self.connections.project_name = self.project_name
+
         self.logger.info('Proceed with creation of new project.')
+        #if self.domain_name:
+        #   try:
+        #     dom_obj   = self.connections.vnc_lib.domain_read(fq_name=[self.domain_name])
+        #   except:
+        #d_obj     = Domain(self.domain_name)
+        #     d_obj.set_domain_limits(gen.resource_xsd.DomainLimitsType.populate())
+        #     d_obj.set_id_perms(gen.resource_xsd.IdPermsType.populate())
+        #     d_obj.set_perms2(gen.resource_xsd.PermType2.populate())
+
+        #domain_id = self.connections.vnc_lib.domain_create(d_obj)
+        #sys.exit()
+        #dom_obj   = self.connections.vnc_lib.domain_read(id=domain_id)
+        #if self.domain_name:
+        #pobj = Project(self.project_name,parent_obj=dom_obj)
+        #else:
+        #   pobj = Project(self.project_name)
+        #pobj = Project(self.project_name)
+        #self.uuid = self.connections.vnc_lib.project_create(pobj) 
         self.uuid = self.auth.create_project(self.project_name)
         self.logger.info('Created Project:%s, ID : %s ' % (self.project_name,
                                                            self.uuid))
@@ -143,7 +165,7 @@ class ProjectFixture(fixtures.Fixture):
                 self.project_name, vmis))
             return False
         sgs = vnc_project_obj.get_security_groups()
-        if len(sgs) > 1:
+        if sgs and len(sgs) > 1:
             self.logger.warn('Project %s still has SGs %s before deletion' %(
                 self.project_name, sgs))
             return False
@@ -268,7 +290,7 @@ class ProjectFixture(fixtures.Fixture):
             "Adding rules to the %s security group in Project %s" %
             (sg_name, self.project_name))
         vnc_lib_h.set_sg_rules(sg_name, rules)
-        self.addCleanup(vnc_lib_h.set_sg_rules, sg_name, old_rules)
+        #self.addCleanup(vnc_lib_h.set_sg_rules, sg_name, old_rules)
 
     @retry(delay=2, tries=10)
     def verify_on_cleanup(self):

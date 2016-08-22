@@ -14,7 +14,7 @@ class OpenstackOrchestrator(Orchestrator):
                                     inputs=inputs, project_name=project_name,
                                     openstack_ip=inputs.openstack_ip)
        self.nova_h = NovaHelper(inputs=inputs, project_name=project_name,
-                              username=username, password=password)
+                              username=username, password=password,update_ssh_key=False)
 
    def get_compute_h(self):
        return self.nova_h
@@ -34,8 +34,14 @@ class OpenstackOrchestrator(Orchestrator):
    def get_zones(self):
        return self.nova_h.get_zones()
 
+   def host_aggregates(self):
+       #import pdb;pdb.set_trace()
+       self.nova_h.obj.aggregates.AggregateManager.create('AG1','AZ')
+
    def create_vm(self, vm_name, image_name, vn_objs, count=1, zone=None, node_name=None, **kwargs):
-       vn_ids = [vn['network']['id'] for vn in vn_objs]
+       vn_ids = kwargs.pop('vn_ids',[])
+       if not vn_ids:
+          vn_ids = [vn['network']['id'] for vn in vn_objs]
        return self.nova_h.create_vm(vm_name=vm_name, image_name=image_name, vn_ids=vn_ids,
                                    zone=zone, node_name=node_name, count=count, **kwargs)
 
@@ -121,9 +127,9 @@ class OpenstackOrchestrator(Orchestrator):
    def delete_floating_ip(self, fip_id):
        self.quantum_h.delete_floatingip(fip_id)
 
-   def assoc_floating_ip(self, fip_id, vm_id):
+   def assoc_floating_ip(self, fip_id, vm_id,vn_id=None):
        update_dict = {}
-       update_dict['port_id'] = self.quantum_h.get_port_id(vm_id)
+       update_dict['port_id'] = self.quantum_h.get_port_id(vm_id,vn_id)
        self.logger.debug('Associating FIP ID %s with Port ID %s' %(fip_id,
                           update_dict['port_id']))
        if update_dict['port_id']:

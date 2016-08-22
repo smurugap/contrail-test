@@ -5,6 +5,7 @@ from neutronclient.client import HTTPClient
 from neutronclient.common.exceptions import NeutronClientException as CommonNetworkClientException
 from keystone_tests import KeystoneCommands
 
+import pdb
 class NetworkClientException(CommonNetworkClientException):
 
     def __init__(self, **kwargs):
@@ -53,7 +54,7 @@ class QuantumHelper():
             self,
             vn_name,
             vn_subnets=None,
-            ipam_fq_name=None,
+            ipam_fq_name_list=[],
             shared=False,
             router_external=False,
             enable_dhcp = True,
@@ -72,8 +73,10 @@ class QuantumHelper():
 
             vn_id = net_rsp['network']['id']
             net_id = net_rsp['network']['id']
+
             if vn_subnets:
-                for subnet in vn_subnets:
+                for subnet_index,subnet in enumerate(vn_subnets):
+                    ipam_fq_name = ipam_fq_name_list[subnet_index]
                     net_rsp = self.create_subnet(
                         subnet, net_id, ipam_fq_name, enable_dhcp, disable_gateway)
             # end for
@@ -105,17 +108,29 @@ class QuantumHelper():
             return None
     # end _create_subnet
 
+#{u'status': u'DOWN', u'name': u'port1', u'admin_state_up': True, u'network_id': u'34d51fed-8a21-4160-b96b-e9788ef42bf2', u'tenant_id': u'89b8f50b2fda4317a54505d928dd5bc9', u'binding:vif_details': {u'port_filter': True}, u'binding:vnic_type': u'normal', u'binding:vif_type': u'vrouter', u'device_owner': u'', u'mac_address': u'02:96:75:99:1c:c9', u'fixed_ips': [{u'subnet_id': u'dc5d270c-df6f-4970-8c19-d6474b06e628', u'ip_address': u'12.176.127.4'}, {u'subnet_id': u'd4922e22-64e4-4ba1-bdd1-70fafee6a963', u'ip_address': u'12.119.254.4'}], u'id': u'9675991c-c918-429f-bbf8-cc459b8973e0', u'security_groups': [u'dfc4c581-516d-46ee-b76a-d2878ce4b2e5'], u'device_id': u''}
+
     def create_port(self, net_id, subnet_id=None, ip_address=None,
                     mac_address=None, no_security_group=False,
                     security_groups=[], extra_dhcp_opts=None):
         port_req_dict = {
             'network_id': net_id,
         }
-        fixed_ip_req = {}
-        if subnet_id:
-            fixed_ip_req['subnet_id'] = subnet_id
-        if ip_address:
-            fixed_ip_req['ip_address'] = ip_address
+        if type(subnet_id) == list:
+           subnet_ids = subnet_id
+        elif subnet_id :
+           subnet_ids = [subnet_id]
+        else:
+           subnet_ids = []
+        
+        port_req_dict['fixed_ips'] = []
+        for subnet_id in subnet_ids:
+            fixed_ip_req = {}
+            if subnet_id:
+                fixed_ip_req['subnet_id'] = subnet_id
+            if ip_address:
+                fixed_ip_req['ip_address'] = ip_address
+            port_req_dict['fixed_ips'].append(fixed_ip_req)
         if mac_address:
             port_req_dict['mac_address'] = mac_address
         if no_security_group:
@@ -124,8 +139,6 @@ class QuantumHelper():
             port_req_dict['security_groups'] = security_groups
         if extra_dhcp_opts:
             port_req_dict['extra_dhcp_opts'] = extra_dhcp_opts
-
-        port_req_dict['fixed_ips'] = [fixed_ip_req]
         try:
             port_rsp = self.obj.create_port({'port': port_req_dict})
             self.logger.debug('Response for create_port : ' + repr(port_rsp))
@@ -303,13 +316,19 @@ class QuantumHelper():
         return self.obj.show_floatingip(fip_id)
     # end get_floatingip
 
-    def get_port_id(self, vm_id):
+    def get_port_id(self, vm_id,vn_id=None):
         ''' Returns the Quantum port-id of a VM.
 
         '''
         try:
             port_rsp = self.obj.list_ports(device_id=[vm_id])
-            port_id = port_rsp['ports'][0]['id']
+            if vn_id:
+              for port in  port_rsp['ports']:
+                if port['network_id'] == vn_id:
+                   port_id = port['id']
+                   break
+            else:
+              port_id = port_rsp['ports'][0]['id']
             return port_id
         except Exception as e:
             self.logger.error('Error occured while getting port-id of a VM ')

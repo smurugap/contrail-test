@@ -1,0 +1,7 @@
+ VM_PSVN->VM_SelfName_None 192.168.0.55 PING vm.3.tenant175.test1.data.soln.com 11.177.44.4 0% Loss rtt min/avg/max/mdev = 0.017/0.018/0.019/0.000 ms PASS
+ VM_PSVN->VM_PsvnIntra_None 192.168.0.55 PING vm.3.tenant175.test1.data.soln.com 11.177.44.4 0% Loss rtt min/avg/max/mdev = 0.014/0.014/0.015/0.004 ms PASS
+ VM_PSVN->BMS_PsvnIntra_None 192.168.0.55 PING 11.177.44.5 11.177.44.5 0% Loss rtt min/avg/max/mdev = 0.171/0.405/0.719/0.230 ms PASS
+ VM_PSVN->BMS_PubFIP_None 192.168.0.55 PING 16.55.0.10 16.55.0.10 100% Loss FAIL
+ VM_PSVN->BMS_PsvnInter_None 192.168.0.55 PING 11.30.122.5 11.30.122.5 100% Loss FAIL
+ VM_PSVN->VM_PVN_FIP 192.168.0.55 PING 16-55-0-9.tenant175.test1.data.soln.com 16.55.0.9 100% Loss FAIL
+ VM_PSVN->BMS_PVN_FIP 192.168.0.55 PING 16.55.0.11 16.55.0.11 100% Loss FAIL

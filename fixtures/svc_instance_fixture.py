@@ -8,11 +8,10 @@ try:
 except ImportError:
     pass
 
-
 class SvcInstanceFixture(fixtures.Fixture):
 
     def __init__(self, connections, inputs, domain_name, project_name, si_name,
-                 svc_template, if_list, left_vn_name=None, right_vn_name=None, do_verify=True, max_inst=1, static_route=['None', 'None', 'None']):
+                 svc_template, if_list, mgmt_vn_name=None,left_vn_name=None, right_vn_name=None, do_verify=True, max_inst=1, static_route=['None', 'None', 'None'],ha_mode=None,az_name='ANY',host_name='ANY',route_community=[None,None,None]):
         self.vnc_lib = connections.vnc_lib
         self.api_s_inspect = connections.api_server_inspect
         self.nova_h = connections.nova_h
@@ -27,13 +26,18 @@ class SvcInstanceFixture(fixtures.Fixture):
         self.project_fq_name = [self.domain_name, self.project_name]
         self.si_fq_name = [self.domain_name, self.project_name, self.si_name]
         self.logger = inputs.logger
+        self.mgmt_vn_name = mgmt_vn_name
         self.left_vn_name = left_vn_name
         self.right_vn_name = right_vn_name
+        self.ha_mode       = ha_mode
+        self.az_name       = az_name
+        self.host_name     = host_name
         self.already_present = False
         self.do_verify = do_verify
         self.if_list = if_list
         self.max_inst = max_inst
         self.static_route = static_route
+        self.route_community = route_community
         self.si = None
         self.svm_ids = []
         self.cs_svc_vns = []
@@ -83,7 +87,7 @@ class SvcInstanceFixture(fixtures.Fixture):
             project = self.vnc_lib.project_read(fq_name=self.project_fq_name)
             svc_instance = ServiceInstance(self.si_name, parent_obj=project)
             if self.left_vn_name and self.right_vn_name:
-                si_prop = ServiceInstanceType(
+                si_prop = ServiceInstanceType(management_virtual_network=self.mgmt_vn_name,
                     left_virtual_network=self.left_vn_name,
                     right_virtual_network=self.right_vn_name)
                 bridge = False
@@ -95,12 +99,25 @@ class SvcInstanceFixture(fixtures.Fixture):
                     elif (itf[0] == 'right' and not bridge):
                         virtual_network = self.right_vn_name
                     else:
-                        virtual_network = ""
-                    if_type = ServiceInstanceInterfaceType(
-                        virtual_network=virtual_network,
-                        static_routes=RouteTableType([RouteType(prefix=self.static_route[self.if_list.index(itf)])]))
-                    if_type.set_static_routes(
-                        RouteTableType([RouteType(prefix=self.static_route[self.if_list.index(itf)])]))
+                        virtual_network = self.mgmt_vn_name
+                    if_type = ServiceInstanceInterfaceType(virtual_network=virtual_network)
+                    if itf[0] in ['left','right']:
+                       route_table_type_obj = RouteTableType()
+                       routes = self.static_route[self.if_list.index(itf)]
+                       route_type_obj_l = []
+                       route_comm = self.route_community[self.if_list.index(itf)]
+                       for indx,route in enumerate(routes):
+                           route_type_obj = RouteType()
+                           route_type_obj.set_prefix(route)
+                           route_comm1     = route_comm[indx]
+                           community_attr = CommunityAttributes()
+                           for comm in route_comm1:
+                               community_attr.add_community_attribute(comm)
+                           route_type_obj.set_community_attributes(community_attr)
+                           route_type_obj_l.append(route_type_obj)
+                       if route_type_obj_l:
+                          route_table_type_obj.set_route(route_type_obj_l)
+                          if_type.set_static_routes(route_table_type_obj)
                     si_prop.add_interface_list(if_type)
 
             else:
@@ -108,23 +125,33 @@ class SvcInstanceFixture(fixtures.Fixture):
                     # In Network mode
                     si_prop = ServiceInstanceType(
                         left_virtual_network=self.left_vn_name)
-                    intf_count = 1
-                    virtual_network = self.left_vn_name
+                    intf_count = 3
+                    vn_name_list = [self.left_vn_name,"",""]
+                elif self.right_vn_name:
+                    si_prop = ServiceInstanceType(
+                        right_virtual_network=self.right_vn_name)
+                    intf_count = 3
+                    vn_name_list = ["",self.right_vn_name,""]
                 else:
                     # Transparent mode
                     si_prop = ServiceInstanceType()
                     intf_count = 1
-                    virtual_network = ""
+                    vn_name_list = ["","",self.mgmt_vn_name]
                     if self.svc_template.service_template_properties.service_type == 'firewall':
                         # Transparent mode firewall
                         intf_count = 3
                 for i in range(intf_count):
                     if_type = ServiceInstanceInterfaceType(
-                        virtual_network=virtual_network)
+                        virtual_network=vn_name_list[i])
                     si_prop.add_interface_list(if_type)
             si_prop.set_scale_out(ServiceScaleOutType(self.max_inst))
-            svc_instance.set_service_instance_properties(si_prop)
             svc_instance.set_service_template(self.svc_template)
+            if not (self.ha_mode == 'None' or self.ha_mode is None):
+               si_prop.set_ha_mode(self.ha_mode)
+            if self.az_name != 'ANY' and self.host_name != 'ANY' :
+               self.zone = '%s:%s'%(self.az_name,self.host_name)
+               si_prop.set_availability_zone(self.zone)
+            svc_instance.set_service_instance_properties(si_prop)
             if self.inputs.is_gui_based_config():
                 self.webui.create_svc_instance(self)
             else:

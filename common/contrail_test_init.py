@@ -458,7 +458,6 @@ class ContrailTestInit(fixtures.Fixture):
 
         if 'hosts_ipmi' in json_data:
             self.hosts_ipmi = json_data['hosts_ipmi']
-
         json_data = ast.literal_eval(prov_data)
 
         return json.loads(prov_data)
