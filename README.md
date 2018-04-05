@@ -40,13 +40,13 @@ Test scripts at a per-feature level. Sub-folders are created for the features.
 ## Test container
 
 The scripts can be executed from a containerized environment.
-As part of the contrail software build the test container is also been built and posted @ dockerhub
-https://hub.docker.com/r/opencontrailnightly/contrail-test-test/
+As part of the contrail software the test containers are also being built and posted @ https://hub.docker.com/r/opencontrailnightly/contrail-test-test/
 
 ### Build test container
 Test container is split into base and test containers where in base has sku and
 orchestrator independent packages like testr, chrome, wget, git etal and
-test container has orchestrator and sku specific packages on top of base
+test container has orchestrator and sku specific packages on top of base.
+
 One can also custom build base and test containers
 #### To build base test container
 ```
@@ -79,12 +79,12 @@ One can also custom build base and test containers
                                        SSHPASS - user password to be used during scp
          --registry-server REGISTRY_SERVER Docker registry hosting the base test container, Defaults to docker.io/opencontrail
          --post          POST          Upload the test container to the registy-server, if specified
-    $> ./build-container.sh test --tag ocata-bld-1 --base-tag ocata-bld-1 --sku ocata --package-url http://path/to/contrail-install-packages.rpm --contrail-repo http://10.84.5.81/pulp/repos/bld-1 --registry-server opencontrailnightly
+    $> ./build-container.sh test --tag ocata-bld-1 --base-tag ocata-bld-1 --sku ocata --package-url http://path/to/contrail-install-packages.rpm --contrail-repo http://path/to/contrail/repo/bld-1 --registry-server opencontrailnightly
 ```
 
 ## Running Tests
-* Create a test input file per https://github.com/Juniper/contrail-test/blob/master/contrail_test_input.yaml.sample
-* Download testrunner.sh script to host where the test container will run
+* Create a test input file as per https://github.com/Juniper/contrail-test/blob/master/contrail_test_input.yaml.sample
+* Download testrunner.sh script to the host where the test container will run
 * Pull the test container image from dockerhub
 * Execute the testrunner.sh script
 ```
