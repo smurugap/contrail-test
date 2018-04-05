@@ -58,10 +58,10 @@ class TestECMP(testtools.TestCase, ResourcedTestCase, fixtures.TestWithFixtures)
 
     def setUp(self):
         super(TestECMP, self).setUp()
-        if 'PARAMS_FILE' in os.environ:
-            self.ini_file = os.environ.get('PARAMS_FILE')
+        if 'TEST_CONFIG_FILE' in os.environ:
+            self.input_file = os.environ.get('TEST_CONFIG_FILE')
         else:
-            self.ini_file = 'params.ini'
+            self.input_file = 'params.ini'
 
     def tearDown(self):
         print "Tearing down test"
@@ -1589,7 +1589,7 @@ class TestECMP(testtools.TestCase, ResourcedTestCase, fixtures.TestWithFixtures)
 
         # Get the project_fixture
         self.project_fixture = self.useFixture(ProjectFixture(
-            vnc_lib_h=self.vnc_lib, project_name=self.inputs.project_name, connections=self.connections))
+            project_name=self.inputs.project_name, connections=self.connections))
         # Read the project obj and set to the floating ip object.
         fip_obj.set_project(self.project_fixture.project_obj)
 

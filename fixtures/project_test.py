@@ -8,101 +8,142 @@ from quantum_test import *
 from vnc_api_test import *
 from contrail_fixtures import *
 from common.connections import ContrailConnections
+from common.contrail_test_init import ContrailTestInit
 from tcutils.util import retry
 from time import sleep
 from openstack import OpenstackAuth
 from vcenter import VcenterAuth
+from cfgm_common.exceptions import NoIdError
 
 
 class ProjectFixture(fixtures.Fixture):
 
-    def __init__(self, vnc_lib_h, connections, auth=None, project_name=None,
-                 username=None, password=None, role='admin', scale= False):
+    def __init__(self, connections, auth=None, project_name=None,
+                 username=None, password=None, role='admin',
+                 domain_name=None, uuid=None):
         self.inputs = connections.inputs
-        if not project_name:
-            project_name = self.inputs.stack_tenant
-        self.vnc_lib_h = vnc_lib_h
+        self.vnc_lib_h = connections.get_vnc_lib_h()
+        self.vnc_lib_fixture = connections.vnc_lib_fixture
+        self.logger = connections.logger
         self.connections = connections
         self.auth = auth
-        self.project_name = project_name
+        self.project_name = project_name or self.inputs.stack_tenant
+        self.orch_domain_name = domain_name or self.inputs.stack_domain
+        if self.orch_domain_name == 'Default':
+            self.domain_name = 'default-domain'
+        else:
+            self.domain_name = self.orch_domain_name
+        self.domain_id = self.connections.domain_id or 'default'
+        self.uuid = uuid
         self.project_obj = None
-        self.domain_name = 'default-domain'
         self.already_present = False
-        self.logger = connections.inputs.logger
         self.project_fq_name = [self.domain_name, self.project_name]
-        self.username = username
-        self.password = password
+        self.project_username = self.username = username or self.connections.username
+        self.project_user_password = self.password = password or self.connections.password
         self.role = role
         self.user_dict = {}
         self._create_user_set = {}
-        self.project_connections = None
+        self.project_connections = dict()
+        self.project_inputs = dict()
         self.api_server_inspects = self.connections.api_server_inspects
         self.verify_is_run = False
-        self.scale = scale
         if not self.auth:
             if self.inputs.orchestrator == 'openstack':
-                self.auth = OpenstackAuth(self.inputs.stack_user,
-                              self.inputs.stack_password,
-                              self.inputs.project_name, self.inputs, self.logger)
-            else: # vcenter
-                self.auth = VcenterAuth(self.inputs.stack_user,
-                              self.inputs.stack_password,
-                              self.inputs.project_name, self.inputs)
+                self.auth = OpenstackAuth(self.inputs.admin_username,
+                                    self.inputs.admin_password,
+                                    self.inputs.admin_tenant, self.inputs, self.logger,
+                                    domain_name=self.inputs.admin_domain)
+            elif self.inputs.orchestrator == 'vcenter':
+                self.auth = VcenterAuth(self.inputs.admin_username,
+                              self.inputs.admin_password,
+                              self.inputs.admin_tenant, self.inputs)
+            else:
+                # Kubernetes 
+                # Set no auth for now
+                self.auth = None
     # end __init__
 
     def _create_project(self):
-        if self.project_name == self.inputs.stack_tenant:
-            self.uuid = self.auth.get_project_id(self.domain_name,
-                                              self.project_name)
-            if not self.uuid:
-                self.logger.info('Project %s not found' % (
-                    self.project_name))
-                raise Exception('Project %s not found' % (
-                    self.project_name))
+        if self.auth:
+            self.uuid = self.auth.create_project(self.project_name,
+                                                 self.orch_domain_name)
+            self.project_obj = self.vnc_lib_fixture.project_read(id=self.uuid)
+        else:
+            # Create it in Contrail-api
+            self.project_obj = self.vnc_lib_fixture.create_project(
+                self.project_name)
+        self._populate_attr()
 
-            self.already_present = True
-            self.logger.debug(
-                        'Project %s already present.Not creating it' %
-                        self.project_fq_name)
-            self.project_obj = self.vnc_lib_h.project_read(id=self.uuid)
-            return self
-
-        self.logger.info('Proceed with creation of new project.')
-        self.uuid = self.auth.create_project(self.project_name)
+#        self.project_obj = self.vnc_lib_h.project_read(id=self.uuid)
         self.logger.info('Created Project:%s, ID : %s ' % (self.project_name,
                                                            self.uuid))
     # end _create_project
 
     def _delete_project(self):
-        self.logger.info('Deleting Project %s' % self.project_fq_name)
-        self.auth.delete_project(self.project_name)
+        if self.auth:
+            self.auth.delete_project(self.project_name)
+        else:
+            self.vnc_lib_fixture.delete_project(self.project_name)
+        self.logger.info('Deleted project: %s, ID : %s ' % (self.project_name,
+                                                            self.uuid))
     # end _delete_project
+
+    def _populate_attr(self):
+        if self.project_obj:
+            self.uuid = self.project_obj.uuid
+            self.project_name = self.project_obj.name
+            self.project_fq_name = self.project_obj.get_fq_name()
 
     def setUp(self):
         super(ProjectFixture, self).setUp()
-        if self.scale:
-            self._create_project()
+        self.create()
+
+    def read(self):
+        # Incase of kubernetes, read the project from vnc api
+        # In other cases, it can be got from self.auth
+        if self.auth:
+            self.uuid = self.auth.get_project_id(self.project_name,
+                                                 self.domain_id)
+        if self.uuid:
+            args = {'id':self.uuid}
         else:
-            self.uuid = self.auth.get_project_id(self.domain_name,
-                                              self.project_name)
-            if self.uuid:
-                self.already_present = True
-                self.logger.debug(
-                        'Project %s already present.Not creating it' %
-                        self.project_fq_name)
-            else:
-                self.logger.info('Project %s not found, creating it' % (
-                    self.project_name))
-                self._create_project()
-                time.sleep(2)
-        self.project_obj = self.vnc_lib_h.project_read(id=self.uuid)
-    # end setUp
+            args = {'fq_name':self.project_fq_name}
+        try:
+            self.project_obj = self.vnc_lib_h.project_read(**args)
+            self._populate_attr()
+            self.already_present = True
+            return self.uuid
+        except NoIdError:
+            return None
+    # end read
+
+    def create(self):
+        self.uuid = self.read()
+        if self.uuid:
+            self.logger.info(
+                    'Using existing project %s(%s)'%(
+                    self.project_fq_name, self.uuid))
+        elif self.project_name == self.inputs.stack_tenant:
+             raise Exception('Project %s not found' % (self.project_name))
+        else:
+            self.logger.info('Project %s not found, creating it' % (
+                self.project_name))
+            self._create_project()
+
+    def get_uuid(self):
+        return self.uuid
+
+    def get_fq_name(self):
+        return self.project_fq_name
 
     def getObj(self):
         return self.project_obj
 
     def cleanUp(self):
         super(ProjectFixture, self).cleanUp()
+        self.delete()
+
+    def delete(self, verify=False):
         if self.inputs.orchestrator == 'vcenter':
             self.logger.debug('No need to verify projects in case of vcenter')
             return
@@ -118,9 +159,10 @@ class ProjectFixture(fixtures.Fixture):
                 self.logger.warn('One or more references still present' 
                     ', will not delete the project %s' % (self.project_name))
                 return
-            self.auth.reauth()
+            if self.auth:
+                self.auth.reauth()
             self._delete_project()
-            if self.verify_is_run:
+            if self.verify_is_run or verify:
                 assert self.verify_on_cleanup()
         else:
             self.logger.debug('Skipping the deletion of Project %s' %
@@ -128,7 +170,7 @@ class ProjectFixture(fixtures.Fixture):
 
     # end cleanUp
 
-    @retry(delay=2, tries=10)
+    @retry(delay=2, tries=30)
     def check_no_project_references(self):
         vnc_project_obj = self.vnc_lib_h.project_read(id=self.uuid)
         vns = vnc_project_obj.get_virtual_networks()
@@ -142,7 +184,7 @@ class ProjectFixture(fixtures.Fixture):
                 self.project_name, vmis))
             return False
         sgs = vnc_project_obj.get_security_groups()
-        if len(sgs) > 1:
+        if sgs and len(sgs) > 1:
             self.logger.warn('Project %s still has SGs %s before deletion' %(
                 self.project_name, sgs))
             return False
@@ -150,19 +192,33 @@ class ProjectFixture(fixtures.Fixture):
     # end check_no_project_references
 
     def get_project_connections(self, username=None, password=None):
-        if not username:
-            username = self.username or self.inputs.stack_user
-        if not password:
-            password = self.password or self.inputs.stack_password
-        if not self.project_connections:
-            self.project_connections = ContrailConnections(
-                inputs=self.inputs,
+        username = username or self.project_username or self.inputs.stack_user
+        password = password or self.project_user_password or \
+            self.inputs.stack_password
+        inputs = self.get_inputs(username=username, password=password)
+        if username not in self.project_connections:
+            self.project_connections[username] = ContrailConnections(
+                inputs=inputs,
                 logger=self.logger,
                 project_name=self.project_name,
                 username=username,
-                password=password)
-        return self.project_connections
+                password=password,
+                domain_name=self.orch_domain_name,
+                scope='project')
+        return self.project_connections[username]
     # end get_project_connections
+
+    def get_inputs(self, username=None, password=None):
+        username = username or self.project_username or self.inputs.stack_user
+        password = password or self.project_user_password or self.inputs.stack_password
+        if username not in self.project_inputs:
+            self.project_inputs[username] = ContrailTestInit(self.inputs.input_file,
+                 stack_domain=self.orch_domain_name,
+                 stack_user=username,
+                 stack_password=password,
+                 stack_tenant=self.project_name,
+                 logger=self.logger)
+        return self.project_inputs[username]
 
     def verify_on_setup(self):
         result = True
@@ -180,12 +236,13 @@ class ProjectFixture(fixtures.Fixture):
             self.logger.debug('No need to verify projects in case of vcenter')
             return True
         result = True
-        for api_s_inspect in self.api_server_inspects.values():
+        for cfgm_ip in self.inputs.cfgm_ips:
+            api_s_inspect = self.api_server_inspects[cfgm_ip]
             cs_project_obj = api_s_inspect.get_cs_project(
                 self.domain_name,
                 self.project_name)
             if not cs_project_obj:
-                self.logger.warn('Project %s not found in API Server %s'
+                self.logger.debug('Project %s not found in API Server %s'
                                  ' ' % (self.project_name, api_s_inspect._ip))
                 result &= False
                 return result
@@ -206,14 +263,15 @@ class ProjectFixture(fixtures.Fixture):
             self.logger.debug('No need to verify projects in case of vcenter')
             return True
         result = True
-        for api_s_inspect in self.api_server_inspects.values():
+        for cfgm_ip in self.inputs.cfgm_ips:
+            api_s_inspect = self.api_server_inspects[cfgm_ip]
             cs_project_obj = api_s_inspect.get_cs_project(
                 self.domain_name,
                 self.project_name)
             self.logger.info("Check for project %s after deletion, got cs_project_obj %s" %
                 (self.project_name, cs_project_obj))
             if cs_project_obj:
-                self.logger.warn('Project %s is still found in API Server %s'
+                self.logger.debug('Project %s is still found in API Server %s'
                                  'with ID %s ' % (self.project_name, api_s_inspect._ip,
                                                   cs_project_obj['project']['uuid']))
                 result &= False
@@ -223,7 +281,8 @@ class ProjectFixture(fixtures.Fixture):
         return result
     # end verify_project_not_in_api_server
 
-    def set_sec_group_for_allow_all(self, project_name, sg_name):
+    def set_sec_group_for_allow_all(self, project_name=None, sg_name='default'):
+        project_name = project_name or self.project_name
         uuid_1 = uuid.uuid1().urn.split(':')[2]
         uuid_2 = uuid.uuid1().urn.split(':')[2]
         rule1 = [{'direction': '>',
@@ -232,7 +291,8 @@ class ProjectFixture(fixtures.Fixture):
                   'dst_ports': [{'start_port': 0, 'end_port': 65535}],
                   'src_ports': [{'start_port': 0, 'end_port': 65535}],
                   'src_addresses': [{'subnet': {'ip_prefix': '0.0.0.0', 'ip_prefix_len': 0}}],
-                  'rule_uuid': uuid_1
+                  'rule_uuid': uuid_1,
+                  'ethertype': 'IPv4'
                   },
                  {'direction': '>',
                   'protocol': 'any',
@@ -240,8 +300,25 @@ class ProjectFixture(fixtures.Fixture):
                   'src_ports': [{'start_port': 0, 'end_port': 65535}],
                   'dst_ports': [{'start_port': 0, 'end_port': 65535}],
                   'dst_addresses': [{'subnet': {'ip_prefix': '0.0.0.0', 'ip_prefix_len': 0}}],
-                  'rule_uuid': uuid_2
+                  'rule_uuid': uuid_2,
+                  'ethertype': 'IPv4'
                   },
+                 {'direction': '>',
+                 'protocol': 'any',
+                  'dst_addresses': [{'security_group': 'local', 'subnet': None}],
+                  'dst_ports': [{'start_port': 0, 'end_port': 65535}],
+                  'src_ports': [{'start_port': 0, 'end_port': 65535}],
+                  'src_addresses': [{'subnet': {'ip_prefix': '::', 'ip_prefix_len': 0}}],
+                  'ethertype': 'IPv6'
+                  },
+                 {'direction': '>',
+                  'protocol': 'any',
+                  'src_addresses': [{'security_group': 'local', 'subnet': None}],
+                  'src_ports': [{'start_port': 0, 'end_port': 65535}],
+                  'dst_ports': [{'start_port': 0, 'end_port': 65535}],
+                  'dst_addresses': [{'subnet': {'ip_prefix': '::', 'ip_prefix_len': 0}}],
+                  'ethertype': 'IPv6'
+                  }
                  ]
         self.update_sec_group(project_name, sg_name, rule1)
     # end set_sec_group_for_allow_all
@@ -281,4 +358,11 @@ class ProjectFixture(fixtures.Fixture):
                 self.project_name))
         return result
     # end verify_on_cleanup
+
+    def set_user_creds(self, username, password):
+        '''Set a user,password who is allowed to login to this project
+        '''
+        self.project_username = username
+        self.project_user_password = password
+    # end set_user_creds
 # end ProjectFixture

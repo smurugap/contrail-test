@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
+#set -x
+
+source tools/common.sh
+
+function die
+{
+    local message=$1
+    [ -z "$message" ] && message="Died"
+    echo "${BASH_SOURCE[1]}: line ${BASH_LINENO[0]}: ${FUNCNAME[1]}: $message." >&2
+    exit 1
+}
 function usage {
   echo "Usage: $0 [OPTION]..."
   echo "Run Contrail test suite"
   echo ""
+  echo "  -p, --prepare		   Only prepare the system and exit. This is useable when somebody want to run the tests manually."
   echo "  -V, --virtual-env        Always use virtualenv.  Install automatically if not present"
   echo "  -N, --no-virtual-env     Don't use virtualenv.  Run tests in local environment"
   echo "  -n, --no-site-packages   Isolate the virtualenv from the global Python environment"
@@ -20,6 +32,8 @@ function usage {
   echo "  -F, --features           Only run tests from features listed"
   echo "  -T, --tags               Only run tests taged with tags"
   echo "  -c, --concurrency        Number of threads to be spawned"
+  echo "  --contrail-fab-path      Contrail fab path, default to /opt/contrail/utils"
+  echo "  --test-failure-threshold Contrail test failure threshold"
   echo "  -- [TESTROPTIONS]        After the first '--' you can pass arbitrary arguments to testr "
 }
 testrargs=""
@@ -33,7 +47,7 @@ no_site_packages=0
 debug=0
 force=0
 wrapper=""
-config_file="sanity_params.ini"
+config_file=""
 update=0
 upload=0
 logging=0
@@ -41,8 +55,11 @@ logging_config=logging.conf
 send_mail=0
 concurrency=""
 parallel=0
+failure_threshold=''
+contrail_fab_path='/opt/contrail/utils'
+export SCRIPT_TS=${SCRIPT_TS:-$(date +"%Y_%m_%d_%H_%M_%S")}
 
-if ! options=$(getopt -o VNnfuUsthdC:lLmF:T:c: -l virtual-env,no-virtual-env,no-site-packages,force,update,upload,sanity,parallel,help,debug,config:logging,logging-config,send-mail,features:tags:concurrency: -- "$@")
+if ! options=$(getopt -o pVNnfuUsthdC:lLmF:T:c: -l test-failure-threshold:,prepare,virtual-env,no-virtual-env,no-site-packages,force,update,upload,sanity,parallel,help,debug,config:,logging,logging-config,send-mail,features:,tags:,concurrency:,contrail-fab-path: -- "$@")
 then
     # parse error
     usage
@@ -54,6 +71,7 @@ first_uu=yes
 while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit;;
+    -p|--prepare) prepare; exit;;
     -V|--virtual-env) always_venv=1; never_venv=0;;
     -N|--no-virtual-env) always_venv=0; never_venv=1;;
     -n|--no-site-packages) no_site_packages=1;;
@@ -62,30 +80,27 @@ while [ $# -gt 0 ]; do
     -U|--upload) upload=1;;
     -d|--debug) debug=1;;
     -C|--config) config_file=$2; shift;;
-    -s|--sanity) tags+="sanity";;
+    -s|--sanity) tags="sanity";;
     -F|--features) path=$2; shift;;
-    -T|--tags) tags="$tags $2"; shift;;
+    -T|--tags) tags="$2"; shift;;
     -t|--parallel) parallel=1;;
     -l|--logging) logging=1;;
     -L|--logging-config) logging_config=$2; shift;;
     -m|--send-mail) send_mail=1;;
     -c|--concurrency) concurrency=$2; shift;;
+    --contrail-fab-path) contrail_fab_path=$2; shift;;
+    --test-failure-threshold) failure_threshold=$2; shift;;
     --) [ "yes" == "$first_uu" ] || testrargs="$testrargs $1"; first_uu=no  ;;
     *) testrargs+=" $1";;
   esac
   shift
 done
-#if [ -n $tags ];then
-#    testrargs+=$tags
-#fi
 
-#export SCRIPT_TS=$(date +"%F_%T")
-
-if [ -n "$config_file" ]; then
-    config_file=`readlink -f "$config_file"`
-    export TEST_CONFIG_DIR=`dirname "$config_file"`
-    export TEST_CONFIG_FILE=`basename "$config_file"`
+config_file=${config_file:-$TEST_CONFIG_FILE}
+if [[ -n $config_file ]]; then
+    export TEST_CONFIG_FILE=$config_file
 fi
+prepare
 
 if [ $logging -eq 1 ]; then
     if [ ! -f "$logging_config" ]; then
@@ -117,27 +132,54 @@ function send_mail {
         ${wrapper} python tools/send_mail.py $1 $2 $3
      fi
   fi
+  echo "Sent mail to interested parties"
 }
 
 function run_tests_serial {
   echo in serial_run_test
-  export PYTHONPATH=$PATH:$PWD:$PWD/serial_scripts:$PWD/fixtures
+  export PYTHONPATH=$PATH:$PWD:$PWD/fixtures:$PWD/serial_scripts
   testr_init
   ${wrapper} find . -type f -name "*.pyc" -delete
   export OS_TEST_PATH=${GIVEN_TEST_PATH:-./serial_scripts/$1}
+  export DO_XMPP_CHECK=0
+  if [ ! -d ${OS_TEST_PATH} ] ; then
+      echo "Folder ${OS_TEST_PATH} does not exist..no tests discovered"
+      return
+  fi
   if [ $debug -eq 1 ]; then
       if [ "$testrargs" = "" ]; then
            testrargs="discover $OS_TEST_PATH"
+          ${wrapper} python -m subunit.run $testrargs | ${wrapper} subunit2junitxml -f -o $serial_result_xml
+      else
+          run_tagged_tests_in_debug_mode
       fi
-      ${wrapper} python -m testtools.run $testrargs
       return $?
+     
   fi
   ${wrapper} testr run --subunit $testrargs | ${wrapper} subunit2junitxml -f -o $serial_result_xml > /dev/null 2>&1
-  python tools/parse_result.py $serial_result_xml 
 }
 
 function check_test_discovery {
-   bash -x tools/check_test_discovery.sh ||  exit 1
+   echo "Checking if test-discovery is fine"
+   bash -x tools/check_test_discovery.sh || die "Test discovery failed!"
+}
+
+function run_tagged_tests_in_debug_mode {
+    list_tagged_tests
+    python tools/parse_test_file.py mylist
+    IFS=$'\n' read -d '' -r -a lines < mylist
+    count=1
+    for i in "${lines[@]}"
+      do
+        result_xml='result'$count'.xml'
+        ((count++))
+        ${wrapper} python -m subunit.run $i| ${wrapper} subunit2junitxml -f -o $result_xml
+      done
+}
+
+function list_tagged_tests {
+    testr list-tests | grep $testrargs > mylist
+
 }
 
 function get_result_xml {
@@ -148,13 +190,30 @@ function get_result_xml {
 function run_tests {
   testr_init
   ${wrapper} find . -type f -name "*.pyc" -delete
-  export PYTHONPATH=$PATH:$PWD:$PWD/scripts:$PWD/fixtures
+  export PYTHONPATH=$PATH:$PWD:$PWD/fixtures:$PWD/scripts
   export OS_TEST_PATH=${GIVEN_TEST_PATH:-./scripts/$1}
+  export DO_XMPP_CHECK=${DO_XMPP_CHECK:-1}
+  if [ ! -d ${OS_TEST_PATH} ] ; then
+      echo "Folder ${OS_TEST_PATH} does not exist..no tests discovered"
+      return
+  fi
   if [ $debug -eq 1 ]; then
       if [ "$testrargs" = "" ]; then
            testrargs="discover $OS_TEST_PATH"
+          ${wrapper} python -m subunit.run $testrargs| ${wrapper} subunit2junitxml -f -o $result_xml
+      else
+          #If the command is run_tests.sh -d -T abcxyz, we
+          #need to take only those tests tagged with abcxyz.
+          #We first create a file, mylist,
+          #of tests tagged with abcxyz.The test would look like 
+          #scripts.vm_regression.test_vm_basic.TestBasicVMVN.test_ping_within_vn[abcxyz]
+          #Then parse_test_file.py would remove [abcxyz] from the test string before
+          #passing it to subunit.
+          #We iterate over the list of tests in the file and run one by one
+          #with subunit
+          #function run_tagged_tests_in_debug_mode does all these activities
+          run_tagged_tests_in_debug_mode 
       fi
-      ${wrapper} python -m testtools.run $testrargs
       return $?
   fi
 
@@ -174,20 +233,35 @@ function run_tests {
           sleep 2
         fi
   fi
-  python tools/parse_result.py $result_xml 
+}
+
+function convert_logs_to_html {
+  python tools/convert_logs_to_html.py logs/
+  echo "Converted log files to html files"
 }
 
 function generate_html {
   if [ -f $result_xml ]; then
       ${wrapper} python tools/update_testsuite_properties.py $REPORT_DETAILS_FILE $result_xml
-      ant
+      ant || die "ant job failed!"
+  elif [ -f $serial_result_xml ]; then
+      ${wrapper} python tools/update_testsuite_properties.py $REPORT_DETAILS_FILE $serial_result_xml
+      ant || die "ant job failed!"
   fi
+  echo "Generate HTML reports in report/ folder : $REPORT_FILE"
+  convert_logs_to_html
+}
+
+function collect_tracebacks {
+    export PYTHONPATH=$PYTHONPATH:$PWD:$PWD/fixtures
+    python tools/collect_bts.py $TEST_CONFIG_FILE
 }
 
 function upload_to_web_server {
   if [ $upload -eq 1 ] ; then
       ${wrapper} python tools/upload_to_webserver.py $TEST_CONFIG_FILE $REPORT_DETAILS_FILE $REPORT_FILE
   fi
+  echo "Uploaded reports"
 }
 
 if [ $never_venv -eq 0 ]
@@ -256,13 +330,28 @@ function apply_junitxml_patch {
         filepath=$src_path/junitxml
     fi
 
-    (cd $filepath; patch -p0 -N --dry-run --silent < $patch_path/junitxml.patch 2>/dev/null)
+    (patch -d $filepath -p0 -N --dry-run --silent < $patch_path/junitxml.patch 2>/dev/null)
     if [ $? -eq 0 ];
     then
         #apply the patch
         echo 'Applied patch'
         (cd $filepath; patch -p0 -N < $patch_path/junitxml.patch)
     fi
+}
+
+function setup_tors {
+( 
+export PYTHONPATH=$PATH:$PWD:$PWD/fixtures;
+source /etc/contrail/openstackrc
+python tools/tor/setup_tors.py $TEST_CONFIG_FILE
+)
+}
+
+function setup_tor_agents {
+( 
+export PYTHONPATH=$PWD:$PWD/fixtures;
+python tools/tor/setup_tor_agents.py $TEST_CONFIG_FILE
+)
 }
 
 function apply_testtools_patch_for_centos {
@@ -283,7 +372,33 @@ if [ $? -eq 0 ];then
 fi
 }
 
-export PYTHONPATH=$PATH:$PWD/scripts:$PWD/fixtures:$PWD
+function stop_on_failure {
+    files='result*'
+    if [[ $failure_threshold ]];then
+        limit=$failure_threshold
+        result=`python tools/stop_on_fail.py --files ${files} --threshold ${limit}`
+        if [[ $result =~ 'Failures within limit' ]]; then
+            return 0
+        else
+            return $(echo $a | awk '{printf "%d", $3}')
+        fi
+    fi
+    return 0
+}
+
+function parse_results {
+    python tools/parse_result.py $result_xml $REPORT_DETAILS_FILE
+    python tools/parse_result.py $serial_result_xml $REPORT_DETAILS_FILE
+}
+    
+function delete_vcenter_nas_datastore {
+( 
+export PYTHONPATH=$PATH:$PWD:$PWD/fixtures;
+python tools/vcenter/delete_vcenter_datastore.py $TEST_CONFIG_FILE
+)
+}
+
+export PYTHONPATH=$PATH:$PWD/fixtures:$PWD/scripts:$PWD
 apply_patches
 export TEST_DELAY_FACTOR=${TEST_DELAY_FACTOR:-1}
 export TEST_RETRY_FACTOR=${TEST_RETRY_FACTOR:-1}
@@ -298,13 +413,31 @@ if [ ! -z $ci_image ]; then
 fi
 
 check_test_discovery
+
+setup_tor_agents
+setup_tors
+
+if [[ -n $JENKINS_TRIGGERED && $JENKINS_TRIGGERED -eq 1 ]]; then
+    export REPORT_DETAILS_FILE=report_details_${SCRIPT_TS}_$(date +"%Y_%m_%d_%H_%M_%S").ini
+    echo $REPORT_DETAILS_FILE
+fi
+
 if [[ ! -z $path ]];then
     for p in $path
         do
+            if [ $p != 'webui' ]; then
+                export EMAIL_SUBJECT_PREFIX=$p
+            fi
+            if [ ! -z "$tags" ];then
+                testrargs+=$tags
+                export TAGS="$tags"
+            fi
             run_tests $p
             run_tests_serial $p
             python tools/report_gen.py $TEST_CONFIG_FILE $REPORT_DETAILS_FILE
+            parse_results
             generate_html 
+            collect_tracebacks
             upload_to_web_server
             sleep 2
             send_mail $TEST_CONFIG_FILE $REPORT_FILE $REPORT_DETAILS_FILE
@@ -330,11 +463,27 @@ if [[ -z $path ]] && [[ -z $testrargs ]];then
 fi
 sleep 2
 
+#To delete nfs datastore in case of
+#vrouter gateway sanity
+delete_vcenter_nas_datastore
+
 python tools/report_gen.py $TEST_CONFIG_FILE $REPORT_DETAILS_FILE
-generate_html 
+echo "Generated report_details* file: $REPORT_DETAILS_FILE"
+parse_results
+generate_html
+collect_tracebacks
 upload_to_web_server
 sleep 2
 send_mail $TEST_CONFIG_FILE $REPORT_FILE $REPORT_DETAILS_FILE
 retval=$?
-
-exit $retval
+stop_on_failure ; rv_stop_on_fail=$?
+if [[ $rv_stop_on_fail > 0 ]]; then
+    exit $rv_stop_on_fail
+else
+    # exit value more than 300 or so will revert the exit value in bash to a lower number, so checking that.
+    if [ $retval -lt 101 ]; then
+        exit $((100+$retval))
+    else
+        exit $retval
+    fi
+fi

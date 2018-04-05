@@ -76,7 +76,8 @@ class TestBasicRTFilterRestart(BaseRtFilterTest):
         self.logger.info(
             'Will restart contrail-vrouter service and check if the RT entries persist')
         for compute_ip in self.inputs.compute_ips:
-            self.inputs.restart_service('contrail-vrouter', [compute_ip])
+            self.inputs.restart_service('contrail-vrouter', [compute_ip],
+                                       container='agent')
         self.logger.info('Sleeping for 30 seconds')
         sleep(30)
         self.logger.info(
@@ -89,7 +90,8 @@ class TestBasicRTFilterRestart(BaseRtFilterTest):
         self.logger.info(
             'Will restart contrail-control service and check if the RT entries persist')
         for bgp_ip in self.inputs.bgp_ips:
-            self.inputs.restart_service('contrail-control', [bgp_ip])
+            self.inputs.restart_service('contrail-control', [bgp_ip],
+                                        container='control')
         self.logger.info('Sleeping for 30 seconds')
         sleep(30)
         self.logger.info(
@@ -246,11 +248,24 @@ class TestBasicRTFilterRestart(BaseRtFilterTest):
                 ctrl_node = self.inputs.host_data[ip]['host_ip']
                 assert self.verify_dep_rt_entry(ctrl_node, route_target, ip2)
             self.logger.info(
-                'Now that both the VMs are associated with the same RT, we should see the dep_routes of both the VMs in all the control nodes')
-            for bgp_ip in self.inputs.bgp_ips:
+                'Now that both the VMs are associated with the same RT, we should see the dep_routes of both the VMs in the respective control nodes')
+            a1 = vm1_fixture.get_control_nodes()
+            b1 = vm2_fixture.get_control_nodes()
+            c1 = list(set(a1+b1))
+            for bgp_ip in c1:
                 ctrl_node = self.inputs.host_data[bgp_ip]['host_ip']
                 assert self.verify_dep_rt_entry(ctrl_node, route_target, ip1)
                 assert self.verify_dep_rt_entry(ctrl_node, route_target, ip2)
+            y = list(set(self.inputs.bgp_control_ips) - set(c1))
+            if len(y) > 0:
+                self.logger.info(
+                    'dep_route corresponding to the VMs should not be in the rt_group table of the control nodes the VMs compute node has no XMPP session with')
+                for ctrl_ip in other_ctrl_ips:
+                    ctrl_node = self.inputs.host_data[ctrl_ip]['host_ip']
+                    assert self.verify_dep_rt_entry_removal(
+                        ctrl_node, route_target, ip1)
+                    assert self.verify_dep_rt_entry_removal(
+                        ctrl_node, route_target, ip2)
         else:
             self.logger.info(
                 'WIll run this test in multiple control-node setup')

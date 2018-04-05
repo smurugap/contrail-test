@@ -44,7 +44,7 @@ class TestSerialSanity_MX(base.FloatingIpBaseTest):
             return (False, 'Skipping Test. Env variable MX_GW_TEST is not set')
         return (True, None)
 
-    @test.attr(type=['mx_test', 'serial', 'sanity', 'vcenter'])
+    @test.attr(type=['mx_test', 'serial', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_change_of_rt_in_vn(self):
         '''
@@ -62,7 +62,7 @@ class TestSerialSanity_MX(base.FloatingIpBaseTest):
         result = True
         fip_pool_name = self.inputs.fip_pool_name 
         vm1_name = 'vm200'
-        vn1_name = 'vn200'
+        vn1_name = get_random_name('vn200')
         vn1_subnets = ['12.1.1.0/24']
         mx_rt = self.inputs.mx_rt
         mx_rt_wrong = '11111'
@@ -92,7 +92,7 @@ class TestSerialSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Adding project %s to FIP pool %s' %
                          (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.assoc_project\
-                        (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                        (self.inputs.project_name)
 
         fip_id = self.public_vn_obj.fip_fixture.create_and_assoc_fip(
             self.public_vn_obj.public_vn_fixture.vn_id, vm1_fixture.vm_id, project_obj)
@@ -121,11 +121,8 @@ class TestSerialSanity_MX(base.FloatingIpBaseTest):
 	    routing_instance, self.inputs.router_asn, mx_rt)
         sleep(10)
 
-        self.logger.info(
-	    "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-        assert vm1_fixture.ping_with_certainty('10.206.255.2')
-        self.logger.info("Now trying to ping www-int.juniper.net")
-        if not vm1_fixture.ping_with_certainty('www-int.juniper.net'):
+        self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
+        if not vm1_fixture.ping_with_certainty(self.inputs.public_host):
 	    result = result and False
 
         # Reverting the RT value for fixture cleanup.
@@ -139,7 +136,7 @@ class TestSerialSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Removing project %s to FIP pool %s' %
                     (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.deassoc_project\
-                    (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                    (self.inputs.project_name)
 
         if not result:
 	    self.logger.error(

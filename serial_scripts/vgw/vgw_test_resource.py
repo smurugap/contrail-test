@@ -19,11 +19,11 @@ class SolnSetup(fixtures.Fixture):
 
     def setUp(self):
         super(SolnSetup, self).setUp()
-        if 'PARAMS_FILE' in os.environ:
-            self.ini_file = os.environ.get('PARAMS_FILE')
+        if 'TEST_CONFIG_FILE' in os.environ:
+            self.input_file = os.environ.get('TEST_CONFIG_FILE')
         else:
-            self.ini_file = 'params.ini'
-        self.inputs = self.useFixture(ContrailTestInit(self.ini_file))
+            self.input_file = 'params.ini'
+        self.inputs = ContrailTestInit(self.input_file)
         self.connections = ContrailConnections(self.inputs)
         self.quantum_h = self.connections.quantum_h
         self.nova_h = self.connections.nova_h
@@ -36,7 +36,7 @@ class SolnSetup(fixtures.Fixture):
     def setup_common_objects(self):
 
         self.project_fixture = self.useFixture(ProjectFixture(
-            vnc_lib_h=self.vnc_lib, project_name=self.inputs.project_name, connections=self.connections))
+            project_name=self.inputs.project_name, connections=self.connections))
         self.logger.info(
             'Default SG to be edited for allow all on project: %s' %
             self.inputs.project_name)

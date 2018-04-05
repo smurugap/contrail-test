@@ -1,11 +1,11 @@
 import fixtures
-from vnc_api import vnc_api
 import inspect
 from quantum_test import *
 try:
     from webui_test import *
 except ImportError:
     pass
+from vnc_api import vnc_api
 
 class VN_Policy_Fixture(fixtures.Fixture):
 
@@ -20,6 +20,7 @@ class VN_Policy_Fixture(fixtures.Fixture):
         self.connections = connections
         self.inputs = self.connections.inputs
         self.quantum_h = self.connections.quantum_h
+        self.domain_name = self.connections.domain_name
         self.project_name = project_name
         self.vnc_lib = self.connections.vnc_lib
         self.api_s_inspect = self.connections.api_server_inspect
@@ -40,7 +41,7 @@ class VN_Policy_Fixture(fixtures.Fixture):
     def setUp(self):
         super(VN_Policy_Fixture, self).setUp()
         policy_of_vn = self.api_s_inspect.get_cs_vn_policys(
-            project=self.project_name, vn=self.vn, refresh=True)
+            project=self.project_name,domain=self.domain_name, vn=self.vn, refresh=True)
         if policy_of_vn:
             for policy in policy_of_vn:
                 if policy in self.vn_policys:
@@ -50,7 +51,7 @@ class VN_Policy_Fixture(fixtures.Fixture):
                     self.already_present = True
         else:
             if self.policy_obj[self.vn]:
-                self.logger.info("Setup step: Associating the policy to VN'")
+                self.logger.debug("Setup step: Associating the policy to VN'")
                 if self.option == 'openstack':
                     policy_fq_names = [
                         self.quantum_h.get_policy_fq_name(x) for x in self.policy_obj[self.vn]]
@@ -59,12 +60,12 @@ class VN_Policy_Fixture(fixtures.Fixture):
                     else:
                         self.vn_obj[self.vn].bind_policies(
                             policy_fq_names, self.vn_obj[self.vn].vn_id)
-                    self.logger.info('Associated Policy:%s to %s' %
+                    self.logger.debug('Associated Policy:%s to %s' %
                                      (policy_fq_names, self.vn))
                 elif self.option == 'contrail':
                     ref_tuple = []
                     vn_update_rsp = None
-                    vnc_obj = self.vn_obj[self.vn].get_api_obj()
+                    vnc_obj = self.vn_obj[self.vn].getObj()
                     policys = self.policy_obj[self.vn]
                     for seq, conf_policy in enumerate(policys):
                         vnc_obj.add_network_policy(conf_policy,
@@ -89,30 +90,30 @@ class VN_Policy_Fixture(fixtures.Fixture):
         if do_cleanup:
             self.detach_Policy_VN()
         else:
-            self.logger.info('Skipping policy detach from VN %s' % (self.vn))
+            self.logger.debug('Skipping policy detach from VN %s' % (self.vn))
     # end cleanUp
 
     def detach_Policy_VN(self):
-        self.logger.info('Detaching the Policy for VN :%s ' % (self.vn))
+        self.logger.debug('Detaching the Policy for VN :%s ' % (self.vn))
         policy_fq_names = []
         if self.policy_obj[self.vn]:
             policy_of_vn = self.api_s_inspect.get_cs_vn_policys(
-                project=self.project_name, vn=self.vn, refresh=True)
+                project=self.project_name, domain=self.domain_name, vn=self.vn, refresh=True)
             if policy_of_vn:
                 if self.option == 'openstack':
                     for policy in policy_of_vn:
                         policy_fq_names.append(self.api_s_inspect.get_cs_policy(
-                            project=self.project_name, policy=policy)['network-policy']['fq_name'])
+                            project=self.project_name,domain=self.domain_name, policy=policy)['network-policy']['fq_name'])
                     if self.inputs.is_gui_based_config():
                         self.webui.detach_policies(self)
                     else:
                         self.vn_obj[self.vn].unbind_policies(
                             self.vn_obj[self.vn].vn_id, policy_fq_names)
-                    self.logger.info('Detached Policy:%s from %s' %
+                    self.logger.debug('Detached Policy:%s from %s' %
                                      (policy_fq_names, self.vn))
                 elif self.option == 'contrail':
                     vn_update_rsp = None
-                    vnc_obj = self.vn_obj[self.vn].get_api_obj()
+                    vnc_obj = self.vn_obj[self.vn].getObj()
                     for conf_policy in self.policy_obj[self.vn]:
                         vnc_obj.del_network_policy(conf_policy)
                     vn_update_rsp = self.vnc_lib.virtual_network_update(vnc_obj)

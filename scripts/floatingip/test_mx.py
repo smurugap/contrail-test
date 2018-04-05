@@ -44,7 +44,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
             return (False, 'Skipping Test. Env variable MX_GW_TEST is not set')
         return (True, None)
 
-    @test.attr(type=['mx_test', 'sanity', 'vcenter'])
+    @test.attr(type=['mx_test', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_mx_gateway(self):
         '''
@@ -64,7 +64,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         fvn_name = 'public'
         fip_subnets = [self.inputs.fip_pool]
         vm1_name = 'vm200'
-        vn1_name = 'vn200'
+        vn1_name = get_random_name('vn200')
         vn1_subnets = ['11.1.1.0/24']
         vn1_fixture = self.useFixture(
             VNFixture(
@@ -86,7 +86,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Adding project %s to FIP pool %s' %
                          (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.assoc_project\
-                        (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                        (self.inputs.project_name)
 
         fip_id = self.public_vn_obj.fip_fixture.create_and_assoc_fip(
             self.public_vn_obj.public_vn_fixture.vn_id, vm1_fixture.vm_id, project_obj)
@@ -99,11 +99,8 @@ class TestSanity_MX(base.FloatingIpBaseTest):
 
         self.logger.info(
             "BGP Peer configuration done and trying to outside the VN cluster")
-        self.logger.info(
-            "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-        assert vm1_fixture.ping_with_certainty('10.206.255.2')
-        self.logger.info("Now trying to ping www-int.juniper.net")
-        if not vm1_fixture.ping_with_certainty('www-int.juniper.net'):
+        self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
+        if not vm1_fixture.ping_with_certainty(self.inputs.public_host):
             result = result and False
 
         if not result:
@@ -116,7 +113,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Removing project %s to FIP pool %s' %
                     (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.deassoc_project\
-                    (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                    (self.inputs.project_name)
 
         return True
     # end test_mx_gateway
@@ -137,7 +134,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         mx_rt = self.inputs.mx_rt
 
         # Get all compute host
-        host_list = self.connections.nova_h.get_hosts()
+        host_list = self.orch.get_hosts()
         compute_1 = host_list[0]
         compute_2 = host_list[0]
         if len(host_list) > 1:
@@ -185,7 +182,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Adding project %s to FIP pool %s' %
                          (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.assoc_project\
-                        (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                        (self.inputs.project_name)
 
         fip_id = self.public_vn_obj.fip_fixture.create_and_assoc_fip(
             self.public_vn_obj.public_vn_fixture.vn_id, vm1_fixture.vm_id, project_obj)
@@ -253,11 +250,8 @@ class TestSanity_MX(base.FloatingIpBaseTest):
 
         self.logger.info(
             'Checking connectivity outside VNS cluster through FIP')
-        self.logger.info(
-            "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-        assert vm1_fixture.ping_with_certainty('10.206.255.2')
-        self.logger.info("Now trying to ping www-int.juniper.net")
-        if not vm1_fixture.ping_with_certainty('www-int.juniper.net'):
+        self.logger.info("Now trying to ping %s" %(self.inputs.public_host))
+        if not vm1_fixture.ping_with_certainty(self.inputs.public_host):
             result = result and False
 
         if not result:
@@ -268,7 +262,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Removing project %s to FIP pool %s' %
             (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.deassoc_project\
-                    (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                    ( self.inputs.project_name)
 
         return True
     # end test_apply_policy_fip_on_same_vn
@@ -307,7 +301,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Adding project %s to FIP pool %s' %
                          (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.assoc_project\
-                        (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                        (self.inputs.project_name)
 
         fip_id = self.public_vn_obj.fip_fixture.create_and_assoc_fip(
             self.public_vn_obj.public_vn_fixture.vn_id, vm1_fixture.vm_id,project_obj)
@@ -318,11 +312,8 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         vm1_fixture.wait_till_vm_up()
         self.logger.info(
             "BGP Peer configuration done and trying to ping outside the VN cluster")
-        self.logger.info(
-            "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-        assert vm1_fixture.ping_with_certainty('10.206.255.2')
-        self.logger.info("Now trying to ping www-int.juniper.net")
-        if not vm1_fixture.ping_with_certainty('www-int.juniper.net'):
+        self.logger.info("Now trying to ping %s" %(self.inputs.public_host))
+        if not vm1_fixture.ping_with_certainty(self.inputs.public_host):
             result = result and False
 
         self.logger.info('Testing FTP...Installing VIM In the VM via FTP')
@@ -374,7 +365,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Removing project %s to FIP pool %s' %
             (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.deassoc_project\
-                    (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                    (self.inputs.project_name)
 
         return True
     # end test_ftp_http_with_public_ip
@@ -509,7 +500,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Adding project %s to FIP pool %s' %
                          (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.assoc_project\
-                        (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                        (self.inputs.project_name)
 
         # FIP public
         self.logger.info(
@@ -573,7 +564,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         flow_rec1_direction = False
         flow_rec1_nat = False
         for iter in range(25):
-            self.logger.debug('**** Iteration %s *****' % iter)
+            self.logger.debug('%%%%%%%% Iteration %s %%%%%%%%%%' % iter)
             flow_rec1 = None
             flow_rec1 = inspect_h1.get_vna_fetchallflowrecords()
             for rec in flow_rec1:
@@ -602,11 +593,8 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         # Checking communication to outside VNS cluster
         self.logger.info(
             'Checking connectivity outside VNS cluster through FIP')
-        self.logger.info(
-            "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-        assert vm1_fixture.ping_with_certainty('10.206.255.2')
-        self.logger.info("Now trying to ping www-int.juniper.net")
-        if not vm1_fixture.ping_with_certainty('www-int.juniper.net'):
+        self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
+        if not vm1_fixture.ping_with_certainty(self.inputs.public_host):
             result = result and False
 
         inspect_h1 = self.agent_inspect[vm1_fixture.vm_node_ip]
@@ -614,7 +602,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         flow_rec2_direction = False
         flow_rec2_nat = False
         for iter in range(25):
-            self.logger.debug('**** Iteration %s *****' % iter)
+            self.logger.debug('%%%%%%%% Iteration %s %%%%%%%%%%' % iter)
             flow_rec2 = None
             flow_rec2 = inspect_h1.get_vna_fetchallflowrecords()
             for rec in flow_rec2:
@@ -644,7 +632,7 @@ class TestSanity_MX(base.FloatingIpBaseTest):
         self.logger.info('Removing project %s to FIP pool %s' %
             (self.inputs.project_name, fip_pool_name))
         project_obj = self.public_vn_obj.fip_fixture.deassoc_project\
-                    (self.public_vn_obj.fip_fixture, self.inputs.project_name)
+                    (self.inputs.project_name)
 
         if not result:
             self.logger.error(

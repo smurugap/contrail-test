@@ -87,7 +87,7 @@ class TestApiPolicyFixture01(BasePolicyTest):
         policy_fixt = self.useFixture(PolicyFixture(
             policy_name, rules_list, self.inputs, self.connections,
             api = 'api'))
-        policy_rsp = self.vnc_lib.network_policy_create(policy_fixt.policy_obj)
+        policy_rsp = policy_fixt.policy_obj.uuid
         self.logger.debug("Policy Creation Response " + str(policy_rsp))
         self.logger.info("policy %s is created with rules using API Server" %
                          policy_name)
@@ -121,7 +121,7 @@ class TestApiPolicyFixture01(BasePolicyTest):
                 vn_in_quantum, "VN is not present on quantum server")
 
         # verify vn_policy data on quantum after association
-        #vn_assoc_policy_quantum = vn_in_quantum['network']['contrail:policys'][0][2]
+        #vn_assoc_policy_quantum = vn_in_quantum['network']['policys'][0][2]
         vn_assoc_policy_quantum = self.get_current_policies_bound(
             self.vnc_lib, vn_id)
         vn_assoc_policy_quantum = str(vn_assoc_policy_quantum[0][2])
@@ -152,14 +152,6 @@ class TestApiPolicyFixture01(BasePolicyTest):
         self.logger.info("VN %s is successfully deleted using API server" %
                          vn1_name)
 
-        # delete network policy
-        np_delete = self.vnc_lib.network_policy_delete(id=str(policy_rsp))
-        if np_delete:
-            self.logger.info("policy %s is still present on the API server" %
-                             policy_name)
-            self.assertIsNone(np_delete, "policy delete failed")
-        self.logger.info("policy %s is successfully deleted using API server" %
-                         policy_name)
         return True
     # end create_api_policy_test
 
@@ -208,7 +200,7 @@ class TestApiPolicyFixture01(BasePolicyTest):
         policy_fixt = self.useFixture(PolicyFixture(
             policy_name, rules_list, self.inputs, self.connections,
             api = 'api'))
-        policy_rsp = self.vnc_lib.network_policy_create(policy_fixt.policy_obj)
+        policy_rsp = policy_fixt.policy_obj.uuid
         self.logger.debug("Policy Creation Response " + str(policy_rsp))
         self.logger.info("policy %s is created with rules using API Server" %
                          policy_name)
@@ -265,15 +257,7 @@ class TestApiPolicyFixture01(BasePolicyTest):
         self.logger.info("policy %s dis-assocation with vn %s is successful" %
                          (policy_name, vn1_name))
 
-        # delete vn and policy
-        np_delete = self.vnc_lib.network_policy_delete(id=str(policy_rsp))
-        if np_delete:
-            self.logger.info("policy %s is still present on the API server" %
-                             policy_name)
-            self.assertIsNone(np_delete, "policy delete failed")
-        self.logger.info("policy %s is successfully deleted using API server" %
-                         policy_name)
-
+        # delete vn
         vn_delete = self.vnc_lib.virtual_network_delete(id=str(vn_id))
         if vn_delete:
             self.logger.info("VN %s is still present on the API server" %
@@ -500,6 +484,8 @@ class TestApiPolicyFixture02(BasePolicyTest):
                 id=str(vn_fixture[vn_of_vm[vm_name]]._obj.uuid))
             vn_quantum_obj = self.quantum_h.get_vn_obj_if_present(
                 vn_read.name)
+            assert vn_read, "VN %s not found in API" % (vn_of_vm[vm_name])
+            assert vn_quantum_obj, "VN %s not found in neutron" % (vn_of_vm[vm_name])
             # Launch VM with 'ubuntu-traffic' image which has scapy pkg
             # remember to call install_pkg after VM bringup
             # Bring up with 2G RAM to support multiple traffic streams..
@@ -511,25 +497,15 @@ class TestApiPolicyFixture02(BasePolicyTest):
                     flavor='contrail_flavor_small',
                     image_name='ubuntu-traffic',
                     vm_name=vm_name))
-            vm_fixture[vm_name].verify_vm_launched()
-            vm_node_ip = self.inputs.host_data[
-                self.nova_h.get_nova_host_of_vm(
-                    vm_fixture[vm_name].vm_obj)]['host_ip']
+        for vm_name in vm_names:
             self.logger.info("Calling VM verifications... ")
-            time.sleep(5)     # wait for 5secs after launching VM's
-            vm_verify_out = None
-            vm_verify_out = vm_fixture[vm_name].verify_on_setup()
-            if not vm_verify_out:
-                m = "%s - vm verify in agent after launch failed" % vm_node_ip
-                err_msg.append(m)
-                return {'result': vm_verify_out, 'msg': err_msg}
+            assert vm_fixture[vm_name].verify_on_setup()
         for vm_name in vm_names:
             out = self.nova_h.wait_till_vm_is_up(
                 vm_fixture[vm_name].vm_obj)
             if not out:
-                return {'result': out, 'msg': "VM failed to come up"}
-            else:
-                vm_fixture[vm_name].install_pkg("Traffic")
+                self.logger.error("VM failed to come up")
+                return out
         # Test ping with scaled policy and rules
         dst_vm = vm_names[len(vm_names) - 1]  # 'vm2'
         dst_vm_fixture = vm_fixture[dst_vm]

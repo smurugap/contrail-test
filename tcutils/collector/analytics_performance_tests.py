@@ -29,11 +29,11 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
 
     def setUp(self):
         super(AnalyticsTestPerformance, self).setUp()
-        if 'PARAMS_FILE' in os.environ:
-            self.ini_file = os.environ.get('PARAMS_FILE')
+        if 'TEST_CONFIG_FILE' in os.environ:
+            self.input_file = os.environ.get('TEST_CONFIG_FILE')
         else:
-            self.ini_file = 'params.ini'
-        self.inputs = self.useFixture(ContrailTestInit(self.ini_file))
+            self.input_file = 'params.ini'
+        self.inputs = self.useFixture(ContrailTestInit(self.input_file))
         self.connections = ContrailConnections(self.inputs)
         self.quantum_h = self.connections.quantum_h
         self.nova_h = self.connections.nova_h
@@ -60,7 +60,7 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
 
         if not tenant_name:
             tenant_name = self.inputs.stack_tenant
-        cmd = "python /opt/contrail/utils/provision_static_route.py --prefix %s \
+        cmd = "python /usr/share/contrail-utils/provision_static_route.py --prefix %s \
                 --virtual_machine_id %s \
                 --tenant_name %s  \
                 --api_server_ip %s \
@@ -98,7 +98,7 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
         except Exception as e:
             self.logger.exception("Got exception at stop_traffic as %s" % (e))
 
-    def create_vms(self, vn_name='vn_analytics', vm_name='vm-analytics', vn_count=1, vm_count=1, flavor='contrail_flavor_small'):
+    def create_vms(self, vn_name=get_random_name('vn_analytics'), vm_name=get_random_name('vm-analytics'), vn_count=1, vm_count=1, flavor='contrail_flavor_small'):
 
         vm1_name = vm_name
         vn_name = vn_name
@@ -134,8 +134,8 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
                 self.logger.info(
                     "Verifying flowSeriesTable through opserver %s" % (ip))
                 res1 = self.analytics_obj.ops_inspect[ip].post_query(
-                    'FlowSeriesTable', start_time=self.start_time, end_time='now', select_fields=['sourcevn', 'sourceip', 'destvn', 'destip', 'sum(packets)', 'sport', 'dport', 'T=1'],
-                    where_clause=self.query, sort=2, limit=5, sort_fields=['sum(packets)'])
+                    'FlowSeriesTable', start_time=self.start_time, end_time='now', select_fields=['sourcevn', 'sourceip', 'destvn', 'destip', 'SUM(packets)', 'sport', 'dport', 'T=1'],
+                    where_clause=self.query, sort=2, limit=5, sort_fields=['SUM(packets)'])
                 self.logger.info("result: %s" % (res1))
                 assert res1
                 self.logger.info("Top 5 flows %s" % (res1))
@@ -162,16 +162,21 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
         max_ip = ip_list[-1]
         return [min_ip, max_ip]
 
-    def create_svc_chains(self, st_name, si_prefix, si_count, max_inst,
-                          left_vn='', right_vn='', svc_mode='in-network', svc_scaling=False):
+    def create_svc_chains(self, st_name, si_prefix, max_inst,
+                          left_vn_fixture=None, right_vn_fixture=None,
+                          svc_mode='in-network'):
 
         self.action_list = []
         self.if_list = [['management', False], ['left', True], ['right', True]]
-        self.st_fixture, self.si_fixtures = self.config_st_si(
-            st_name, si_prefix, si_count,
-            svc_scaling, max_inst, left_vn=left_vn,
-            right_vn=right_vn, svc_mode=svc_mode)
-        self.action_list = self.chain_si(si_count, si_prefix)
+
+        svc_chain_info = self.config_svc_chain(
+            left_vn_fixture=left_vn_fixture,
+            right_vn_fixture=right_vn_fixture,
+            service_mode=svc_mode,
+            st_name=st_name,
+            max_inst=max_inst)
+        self.st_fixture = svc_chain_info['st_fixture']
+        self.si_fixture = svc_chain_info['si_fixture']
 
     def create_policy(self, policy_name='policy_in_network', rules=[], src_vn_fixture=None, dest_vn_fixture=None):
 
@@ -189,11 +194,13 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
 
     def setup_service_instance(
         self, st_name='in_net_svc_template_1', si_prefix='in_net_svc_instance_',
-            si_count=1, svc_scaling=False, max_inst=1, left_vn='', right_vn='', svc_mode='in-network'):
+            si_count=1, svc_scaling=False, max_inst=1, left_vn_fixture=None,
+            right_vn_fixture=None, svc_mode='in-network'):
 
         self.create_svc_chains(
-            st_name, si_prefix, si_count, max_inst, svc_scaling=svc_scaling,
-            left_vn=left_vn, right_vn=right_vn, svc_mode=svc_mode)
+            st_name, si_prefix, max_inst,
+            left_vn_fixture=left_vn_fixture,
+            right_vn_fixture=right_vn_fixture, svc_mode=svc_mode)
 
     def setup_policy(self, policy_name='policy_in_network', policy_rules=[], src_vn_fixture=None, dest_vn_fixture=None):
 
@@ -201,12 +208,14 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
             policy_name=policy_name, rules=policy_rules, src_vn_fixture=src_vn_fixture,
             dest_vn_fixture=dest_vn_fixture)
 
-    def restart_service(self, ip_list, service, command='restart'):
+    def restart_service(self, ip_list, service, command='restart',
+						container=None):
 
         for ip in ip_list:
             cmd = 'service %s %s' % (service, command)
             self.inputs.run_cmd_on_server(
-                ip, cmd, username='root', password='c0ntrail123')
+                ip, cmd, username='root', password='c0ntrail123',
+				container=container)
 
     def reboot_node(self, ip_list):
 
@@ -218,7 +227,8 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
 
         vm.run_cmd_on_vm([cmd])
 
-    def triggers(self, preference='', ip=[], command='', service='', vm=None):
+    def triggers(self, preference='', ip=[], command='', service='', vm=None,
+				 container=None):
         '''
         preference : agent restart - to restart vrouter service
                      control restart
@@ -237,7 +247,7 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
 
         if not preference:
             if (ip and service):
-                self.restart_service(ip, service)
+                self.restart_service(ip, service, container=container)
             if vm:
                 self.reboot_vm(vm)
             if ip:
@@ -245,13 +255,13 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
             return
         if (preference in 'agent restart') or (preference in 'control restart') or (preference in 'collector restart'):
             if (ip and service):
-                self.restart_service(ip, service)
+                self.restart_service(ip, service, container=container)
         if (preference in 'agent stop') or (preference in 'control stop') or (preference in 'collector stop'):
             if (ip and service):
-                self.restart_service(ip, service)
+                self.restart_service(ip, service, container=container)
         if (preference in 'agent start') or (preference in 'control start') or (preference in 'collector start'):
             if (ip and service):
-                self.restart_service(ip, service)
+                self.restart_service(ip, service, container=container)
         if (preference in 'agent reboot') or (preference in 'control reboot') or (preference in 'collector reboot'):
             if ip:
                 self.reboot_node(ip)
@@ -290,23 +300,8 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
         right_vn_fq_name = self.setup_fixture.vn_obj_dict.values()[
             1].vn_fq_name
         self.setup_service_instance(
-            left_vn=left_vn_fq_name, right_vn=right_vn_fq_name)
+            left_vn_fixture=left_vn_fix, right_vn_fixture=right_vn_fix)
 
-        # Creating rules and policy
-        rules = [
-            {
-                'direction': '<>',
-                'protocol': 'any',
-                'source_network': left_vn_fq_name,
-                'src_ports': [0, -1],
-                'dest_network': right_vn_fq_name,
-                'dst_ports': [0, -1],
-                'simple_action': 'pass',
-                'action_list': {'apply_service': self.action_list}
-            },
-        ]
-        self.setup_policy(policy_rules=rules,
-                          src_vn_fixture=left_vn_fix, dest_vn_fixture=right_vn_fix)
         # Sending traffic
         prefix = '111.1.0.0/16'
         vm_uuid = self.setup_fixture.vm_valuelist[0].vm_obj.id
@@ -349,21 +344,24 @@ class AnalyticsTestPerformance(testtools.TestCase, ConfigSvcChain, VerifySvcChai
         temp = self.inputs.compute_ips[:]
         self.inputs.compute_ips.remove(self.tx_vm_node_ip)
         self.triggers(preference='agent restart', ip=self.inputs.compute_ips,
-                      command='restart', service='contrail-vrouter')
+                      command='restart', service='contrail-vrouter',
+					  container='agent')
         time.sleep(20)
         self.verifications(verify='uve')
         self.inputs.compute_ips = temp[:]
         # switchover collector
         self.logger.info("Verifying collector start/stop")
         self.triggers(preference='collector stop', ip=[
-                      self.inputs.collector_ips[0]], command='stop', service='supervisor-analytics')
+                      self.inputs.collector_ips[0]], command='stop', service='supervisor-analytics',
+					  container='analytics')
         temp = self.inputs.collector_ips[:]
         self.inputs.collector_ips.remove(self.inputs.collector_ips[0])
         time.sleep(10)
         self.verifications(verify='uve')
         self.inputs.collector_ips = temp[:]
         self.triggers(preference='collector start', ip=[
-                      self.inputs.collector_ips[0]], command='start', service='supervisor-analytics')
+                      self.inputs.collector_ips[0]], command='start', service='supervisor-analytics',
+                      container='analytics')
         time.sleep(10)
         # collector reboot
         self.logger.info("Verifying collector reboot")

@@ -1,24 +1,17 @@
-import test
+import test_v1
 import re
 from common.connections import ContrailConnections
 from common import isolated_creds
 from vm_test import VMFixture
 from vn_test import VNFixture
 
-class BaseVnVmTest(test.BaseTestCase):
+class BaseVnVmTest(test_v1.BaseTestCase_v1):
 
     @classmethod
     def setUpClass(cls):
         super(BaseVnVmTest, cls).setUpClass()
-        cls.isolated_creds = isolated_creds.IsolatedCreds(cls.__name__, \
-				cls.inputs, ini_file = cls.ini_file, \
-				logger = cls.logger)
-        cls.isolated_creds.setUp()
-        cls.project = cls.isolated_creds.create_tenant() 
-        cls.isolated_creds.create_and_attach_user_to_tenant()
-        cls.inputs = cls.isolated_creds.get_inputs()
         cls.inputs.set_af('v4')
-        cls.connections = cls.isolated_creds.get_conections() 
+        cls.orch = cls.connections.orch
         cls.quantum_h= cls.connections.quantum_h
         cls.nova_h = cls.connections.nova_h
         cls.vnc_lib= cls.connections.vnc_lib
@@ -30,8 +23,6 @@ class BaseVnVmTest(test.BaseTestCase):
 
     @classmethod
     def tearDownClass(cls):
-        #cls.isolated_creds.delete_user()
-        cls.isolated_creds.delete_tenant()
         super(BaseVnVmTest, cls).tearDownClass()
     #end tearDownClass 
 
@@ -85,12 +76,16 @@ class BaseVnVmTest(test.BaseTestCase):
                           *args, **kwargs
                           ))
 
-    def create_vm(self, vn_fixture, image_name='ubuntu', *args, **kwargs):
+    def create_vm(self, vn_fixture=None, image_name='ubuntu', *args, **kwargs):
+        if vn_fixture:
+            vn_obj = vn_fixture.obj
+        else:
+            vn_obj = None
         return self.useFixture(
                 VMFixture(
                     project_name=self.inputs.project_name,
                     connections=self.connections,
-                    vn_obj=vn_fixture.obj,
+                    vn_obj=vn_obj,
                     image_name=image_name,
                     *args, **kwargs
                     ))
@@ -105,7 +100,7 @@ class BaseVnVmTest(test.BaseTestCase):
           if output and 'eth1' in output:
               break
           else:
-              sleep(3)
+              time.sleep(3)
 
     def verify_eth1_ip_from_vm(self, vm_fix):
         i = 'ifconfig eth1'
@@ -118,3 +113,10 @@ class BaseVnVmTest(test.BaseTestCase):
         else:
            return False
 
+    def get_two_different_compute_hosts(self):
+        host_list = self.connections.orch.get_hosts()
+        self.compute_1 = host_list[0]
+        self.compute_2 = host_list[0]
+        if len(host_list) > 1:
+            self.compute_1 = host_list[0]
+            self.compute_2 = host_list[1]   

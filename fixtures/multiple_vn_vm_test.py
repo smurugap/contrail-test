@@ -8,8 +8,6 @@
 import os
 from time import sleep
 
-from common.openstack_libs import nova_client as mynovaclient
-from common.openstack_libs import nova_exception as novaException
 import fixtures
 from common.contrail_test_init import ContrailTestInit
 from vn_test import *
@@ -29,7 +27,7 @@ import Queue
 class create_multiple_vn_and_multiple_vm_fixture(fixtures.Fixture):
 
 #    @classmethod
-    def __init__(self, connections, inputs, policy_objs=[], subnets=[], project_name=None, image_name='ubuntu', flavor='contrail_flavor_tiny', vn_name='vn', vm_name='vm', vn_count=1, vm_count=2, subnet_count=2, af=None, userdata=None):
+    def __init__(self, connections, inputs, policy_objs=[], subnets=[], project_name=None, image_name='ubuntu', flavor='contrail_flavor_tiny', vn_name=get_random_name('vn'), vm_name=get_random_name('vm'), vn_count=1, vm_count=2, subnet_count=2, af=None, userdata=None):
         """ 
         creates a dict of the format: {vn_name:{vm_name:vm_obj,...}}
         """
@@ -120,7 +118,7 @@ class create_multiple_vn_and_multiple_vm_fixture(fixtures.Fixture):
             for k in self.vn_keylist:
                 self.vn_obj = self.vn_obj_dict[k].obj
                 for c in range(self.vm_count):
-                    vm_name = '%s_%s_%s' % (k, self.vm_name, c)
+                    vm_name = get_random_name('%s_%s_%s' % (k, self.vm_name, c))
                     vm_fixture = VMFixture(connections=self.connections,
                                            vn_obj=self.vn_obj, vm_name=vm_name, project_name=self.inputs.project_name,
                                            userdata=self.userdata, image_name=self.image_name, flavor=self.flavor)
@@ -137,7 +135,7 @@ class create_multiple_vn_and_multiple_vm_fixture(fixtures.Fixture):
         except Exception as e:
             print e
         for thread in self.vm_threads:
-            time.sleep(3)
+            time.sleep(1)
             thread.start()
 
         for thread in self.vm_threads:
@@ -212,7 +210,6 @@ class create_multiple_vn_and_multiple_vm_fixture(fixtures.Fixture):
     def setUp(self):
         super(create_multiple_vn_and_multiple_vm_fixture, self).setUp()
         self.createMultipleVN()
-        time.sleep(5)
         self.createMultipleVM()
         time.sleep(5)
 

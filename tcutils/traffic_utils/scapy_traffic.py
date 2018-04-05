@@ -1,10 +1,13 @@
+import os
+import sys
+
+sys.path.append(os.path.realpath('tcutils/pkgs/Traffic'))
 from traffic.core.stream import Stream
 from traffic.core.helpers import Host, Sender, Receiver
 from traffic.core.profile import StandardProfile,\
     ContinuousProfile
 from tcutils.util import get_random_name
 from base_traffic import *
-sys.path.append(os.path.realpath('tcutils/pkgs/Traffic'))
 
 class Scapy(BaseTraffic):
 
@@ -23,7 +26,11 @@ class Scapy(BaseTraffic):
             sport,
             dport,
             pkt_count=None,
-            fip=None):
+            fip=None,
+            sender_vn_fqname=None,
+            receiver_vn_fqname=None,
+            af=None,
+            interval=0):
 
         self.sender_vm = sender_vm
         self.receiver_vm = receiver_vm
@@ -33,27 +40,25 @@ class Scapy(BaseTraffic):
         self.inputs = sender_vm.inputs
         self.logger = self.inputs.logger
         self.pkt_count = pkt_count
-        self.fip = fip
+        self.src_ip = sender_vm.get_vm_ips(
+                          vn_fq_name=sender_vn_fqname, af=af)[0]
+        recv_ip = receiver_vm.get_vm_ips(
+                          vn_fq_name=receiver_vn_fqname, af=af)[0]
+        self.dst_ip = self.recv_ip = recv_ip
+        if fip:
+            self.dst_ip = fip
+        self.interval = interval
 
-        if self.fip:
-            stream = Stream(
-                protocol="ip",
+        stream = Stream(
                 sport=self.sport,
                 dport=self.dport,
                 proto=self.proto,
-                src=self.sender_vm.vm_ip,
-                dst=self.fip)
-        else:
-            stream = Stream(
-                protocol="ip",
-                sport=self.sport,
-                dport=self.dport,
-                proto=self.proto,
-                src=self.sender_vm.vm_ip,
-                dst=self.receiver_vm.vm_ip)
+                src=self.src_ip,
+                dst=self.dst_ip,
+                inter=self.interval)
         profile_kwargs = {'stream': stream}
-        if self.fip:
-            profile_kwargs.update({'listener': self.receiver_vm.vm_ip})
+        if fip:
+            profile_kwargs.update({'listener': self.recv_ip})
         if self.pkt_count:
             profile_kwargs.update({'count': self.pkt_count})
             profile = StandardProfile(**profile_kwargs)

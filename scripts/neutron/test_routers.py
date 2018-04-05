@@ -34,7 +34,7 @@ class TestRouters(BaseNeutronTest):
     def tearDownClass(cls):
         super(TestRouters, cls).tearDownClass()
 
-    @test.attr(type=['sanity'])
+    @test.attr(type=['sanity', 'vcenter_compute'])
     @preposttest_wrapper
     def test_basic_router_behavior(self):
         '''Validate a router is able to route packets between two VNs
@@ -56,9 +56,9 @@ class TestRouters(BaseNeutronTest):
         vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
         vn2_fixture = self.create_vn(vn2_name, vn2_subnets)
         vn1_vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name,
-                                         image_name='cirros-0.3.0-x86_64-uec')
+                                         image_name='cirros')
         vn2_vm1_fixture = self.create_vm(vn2_fixture, vn2_vm1_name,
-                                         image_name='cirros-0.3.0-x86_64-uec')
+                                         image_name='cirros')
         assert vn1_vm1_fixture.wait_till_vm_is_up()
         assert vn2_vm1_fixture.wait_till_vm_is_up()
         assert vn1_vm1_fixture.ping_with_certainty(vn2_vm1_fixture.vm_ip,
@@ -111,9 +111,9 @@ class TestRouters(BaseNeutronTest):
         vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
         vn2_fixture = self.create_vn(vn2_name, vn2_subnets)
         vn1_vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name,
-                                         image_name='cirros-0.3.0-x86_64-uec')
+                                         image_name='cirros')
         vn2_vm1_fixture = self.create_vm(vn2_fixture, vn2_vm1_name,
-                                         image_name='cirros-0.3.0-x86_64-uec')
+                                         image_name='cirros')
         assert vn1_vm1_fixture.wait_till_vm_is_up()
         assert vn2_vm1_fixture.wait_till_vm_is_up()
         assert vn1_vm1_fixture.ping_with_certainty(vn2_vm1_fixture.vm_ip,
@@ -159,9 +159,9 @@ class TestRouters(BaseNeutronTest):
         vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
         vn2_fixture = self.create_vn(vn2_name, vn2_subnets)
         vn1_vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name,
-                                         image_name='cirros-0.3.0-x86_64-uec')
+                                         image_name='cirros')
         vn2_vm1_fixture = self.create_vm(vn2_fixture, vn2_vm1_name,
-                                         image_name='cirros-0.3.0-x86_64-uec')
+                                         image_name='cirros')
         assert vn1_vm1_fixture.wait_till_vm_is_up()
         assert vn2_vm1_fixture.wait_till_vm_is_up()
         assert vn1_vm1_fixture.ping_with_certainty(vn2_vm1_fixture.vm_ip,
@@ -250,54 +250,7 @@ class TestRouterSNAT(BaseNeutronTest):
             return (False, 'Skipping Test. Env variable MX_GW_TEST is not set')
         return (True, None)
 
-    @test.attr(type=['ci_sanity'])
-    @preposttest_wrapper
-    def test_basic_snat_behavior_without_external_connectivity(self):
-        '''Create an external network, a router
-        set router-gateway to external network
-        launch a private network and attach it to router
-        validate left vm pinging right vm through Snat
-       '''
-
-        vm1_name = get_random_name('vm_left')
-        vn1_name = get_random_name('vn_private')
-        vn1_subnets = [get_random_cidr()]
-        self.allow_default_sg_to_allow_all_on_project(self.inputs.project_name)
-        vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
-        vn1_fixture.verify_on_setup()
-        vm1_fixture = self.create_vm(vn1_fixture, vm1_name,
-                                         image_name='ubuntu')
-        vm1_fixture.wait_till_vm_is_up()
-
-        ext_vn_name = get_random_name('ext_vn')
-        ext_subnets = [get_random_cidr()]
-
-        ext_vn_fixture = self.useFixture(
-            VNFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_name=ext_vn_name,
-                inputs=self.inputs,
-                subnets=ext_subnets,
-                router_external=True))
-
-        ext_vn_fixture.verify_on_setup()
-
-        vm2_name = get_random_name('vm_right')
-        vm2_fixture = self.create_vm(ext_vn_fixture, vm2_name,
-                                         image_name='ubuntu')
-        vm2_fixture.wait_till_vm_is_up()
-
-        router_name = get_random_name('router1')
-        router_dict = self.create_router(router_name)
-        router_rsp = self.quantum_h.router_gateway_set(
-                router_dict['id'],
-                ext_vn_fixture.vn_id)
-        self.add_vn_to_router(router_dict['id'], vn1_fixture)
-        assert vm1_fixture.ping_with_certainty(
-         vm2_fixture.vm_ip), 'Ping from vm_left to vm_right through snat failed'
-
-    @test.attr(type=['sanity'])
+    @test.attr(type=['cb_sanity', 'sanity'])
     @preposttest_wrapper
     def test_basic_snat_behavior(self):
         '''Create an external network, a router
@@ -359,7 +312,6 @@ class TestRouterSNAT(BaseNeutronTest):
             username=self.inputs.stack_user,
             password=self.inputs.stack_password,
             project_name=project_name,
-            vnc_lib_h=self.vnc_lib,
             connections=self.connections))
         user_fixture.add_user_to_tenant(project_name, 'test_usr', 'admin')
         assert project_fixture_obj.verify_on_setup()
@@ -372,7 +324,6 @@ class TestRouterSNAT(BaseNeutronTest):
             username=self.inputs.stack_user,
             password=self.inputs.stack_password,
             project_name=project_name1,
-            vnc_lib_h=self.vnc_lib,
             connections=self.connections))
         user_fixture1.add_user_to_tenant(project_name1, 'test_usr1', 'admin')
         assert project_fixture_obj1.verify_on_setup()
@@ -422,7 +373,8 @@ class TestRouterSNAT(BaseNeutronTest):
                     vm_name=vm2_name))
         vm2_fixture.wait_till_vm_is_up()
         router_name = get_random_name('router1')
-        router_dict = self.create_router(router_name, tenant_id=project_fixture_obj1.uuid)
+        neutron_h1 = proj_connection1.quantum_h
+        router_dict = self.create_router(router_name, neutron_handle=neutron_h1)
         router_rsp = self.quantum_h.router_gateway_set(
                 router_dict['id'],
                 self.public_vn_obj.public_vn_fixture.vn_id)
@@ -430,7 +382,8 @@ class TestRouterSNAT(BaseNeutronTest):
 
         assert self.verify_snat(vm1_fixture)
         router_name = get_random_name('router2')
-        router_dict = self.create_router(router_name, tenant_id=project_fixture_obj.uuid)
+        neutron_h = proj_connection.quantum_h
+        router_dict = self.create_router(router_name, neutron_handle=neutron_h)
         router_rsp = self.quantum_h.router_gateway_set(
                 router_dict['id'],
                 self.public_vn_obj.public_vn_fixture.vn_id)
@@ -448,7 +401,6 @@ class TestRouterSNAT(BaseNeutronTest):
             username=self.inputs.stack_user,
             password=self.inputs.stack_password,
             project_name=project_name,
-            vnc_lib_h=self.vnc_lib,
             connections=self.connections))
         user_fixture.add_user_to_tenant(project_name, 'test_usr', 'admin')
         assert project_fixture_obj.verify_on_setup()
@@ -461,7 +413,6 @@ class TestRouterSNAT(BaseNeutronTest):
             username=self.inputs.stack_user,
             password=self.inputs.stack_password,
             project_name=project_name1,
-            vnc_lib_h=self.vnc_lib,
             connections=self.connections))
         user_fixture1.add_user_to_tenant(project_name1, 'test_usr1', 'admin')
         assert project_fixture_obj1.verify_on_setup()

@@ -6,11 +6,14 @@ from policy_test import PolicyFixture, copy
 from common.policy import policy_test_utils
 from vm_test import VMFixture, time
 from tcutils.topo.sdn_topo_setup import sdnTopoSetupFixture
-from tcutils.util import get_random_name, get_random_cidr, gen_str_with_spl_char 
+from tcutils.util import get_random_name, get_random_cidr
 from common.system.system_verification import system_vna_verify_policy
 from tcutils.test_lib.test_utils import assertEqual
 import sdn_basic_topology
 import os
+import test_policy_basic
+
+af_test = 'dual'
 
 class TestBasicPolicyConfig(BasePolicyTest):
 
@@ -40,7 +43,7 @@ class TestBasicPolicyConfig(BasePolicyTest):
             node_name=None,
             flavor='contrail_flavor_small',
             image_name='ubuntu-traffic'):
-        image_name=os.environ['ci_image'] if os.environ.has_key('ci_image') else 'ubuntu-traffic'
+        image_name = self.inputs.get_ci_image() or 'ubuntu-traffic'
         return self.useFixture(
             VMFixture(
                 project_name=self.inputs.project_name,
@@ -50,173 +53,6 @@ class TestBasicPolicyConfig(BasePolicyTest):
                 image_name=image_name,
                 flavor=flavor,
                 node_name=node_name))
-
-    @test.attr(type=['sanity','ci_sanity','quick_sanity', 'vcenter'])
-    @preposttest_wrapper
-    def test_policy(self):
-        """ Configure policies based on topology and run policy related verifications.
-        """
-        result = True
-        #
-        # Get config for test from topology
-        topology_class_name = sdn_basic_topology.sdn_basic_config
-        self.logger.info(
-            "Scenario for the test used is: %s" %
-            (topology_class_name))
-        # set project name
-        try:
-            # provided by wrapper module if run in parallel test env
-            topo = topology_class_name(
-                project=self.project.project_name,
-                username=self.project.username,
-                password=self.project.password)
-        except NameError:
-            topo = topology_class_name()
-        #
-        # Test setup: Configure policy, VN, & VM
-        # return {'result':result, 'msg': err_msg, 'data': [self.topo, config_topo]}
-        # Returned topo is of following format:
-        # config_topo= {'policy': policy_fixt, 'vn': vn_fixture, 'vm': vm_fixture}
-        setup_obj = self.useFixture(
-            sdnTopoSetupFixture(self.connections, topo))
-        out = setup_obj.topo_setup()
-        assertEqual(out['result'], True, out['msg'])
-        if out['result']:
-            topo, config_topo = out['data']
-        #
-        # Verify [and assert on fail] after setup
-        # Calling system policy verification, pick any policy fixture to
-        # access fixture verification
-        policy_name = topo.policy_list[0]
-        system_vna_verify_policy(
-            self,
-            config_topo['policy'][policy_name],
-            topo,
-            'setup')
-        return True
-    # end test_policy
-
-    @preposttest_wrapper
-    def test_policy_with_spl_char_in_name(self):
-        result = True
-        vn1_name = get_random_name('vn1')
-        vn1_subnets = [get_random_cidr()]
-        vn2_name = get_random_name('vn2')
-        vn2_subnets = [get_random_cidr()]
-
-        policy_name = 'policy1' + gen_str_with_spl_char(10) 
-
-        rules = [
-            {
-                'direction': '<>', 'simple_action': 'pass',
-                'protocol': 'any', 'src_ports': 'any',
-                'dst_ports': 'any',
-                'source_network': 'any',
-                'dest_network': 'any',
-            },
-        ]
-
-        policy_fixture = self.useFixture(
-            PolicyFixture(
-                policy_name=policy_name, rules_list=rules, inputs=self.inputs,
-                connections=self.connections))
-        vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
-        vn1_fixture.bind_policies(
-            [policy_fixture.policy_fq_name], vn1_fixture.vn_id)
-        vn2_fixture = self.create_vn(vn2_name, vn2_subnets)
-        vn2_fixture.bind_policies(
-            [policy_fixture.policy_fq_name], vn2_fixture.vn_id)
-
-        self.addCleanup(vn1_fixture.unbind_policies,
-                        vn1_fixture.vn_id, [policy_fixture.policy_fq_name])
-        assert vn1_fixture.verify_on_setup()
-
-        self.addCleanup(vn2_fixture.unbind_policies,
-                        vn2_fixture.vn_id, [policy_fixture.policy_fq_name])
-        assert vn2_fixture.verify_on_setup()
-
-        vn1_vm1_name = get_random_name('vn1_vm1')
-        vn2_vm1_name = get_random_name('vn2_vm1')
-        vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name)
-        vm2_fixture = self.create_vm(vn1_fixture, vn2_vm1_name)
-        vm1_fixture.wait_till_vm_is_up()
-        vm2_fixture.wait_till_vm_is_up()
-
-        if not vm1_fixture.ping_to_ip(vm2_fixture.vm_ip):
-            self.logger.error(
-                'Ping from %s to %s failed, expected it to pass' %
-                (vm1_fixture.vm_name, vm2_fixture.vm_name))
-            result = False
-        if not vm2_fixture.ping_to_ip(vm1_fixture.vm_ip):
-            self.logger.error(
-                'Ping from %s to %s failed, expected it to pass' %
-                (vm2_fixture.vm_name, vm1_fixture.vm_name))
-            result = False
-
-        self.inputs.restart_service('ifmap', host_ips=self.inputs.cfgm_ips)
-
-        sleep(10)
-
-        if not vm1_fixture.ping_to_ip(vm2_fixture.vm_ip):
-            self.logger.error(
-                'Ping from %s to %s failed, expected it to pass' %
-                (vm1_fixture.vm_name, vm2_fixture.vm_name))
-            result = False
-        if not vm2_fixture.ping_to_ip(vm1_fixture.vm_ip):
-            self.logger.error(
-                'Ping from %s to %s failed, expected it to pass' %
-                (vm2_fixture.vm_name, vm1_fixture.vm_name))
-            result = False
-
-        return result
-
-    @test.attr(type=['sanity','ci_sanity','quick_sanity', 'vcenter'])
-    @preposttest_wrapper
-    def test_policy_to_deny(self):
-        ''' Test to validate that with policy having rule to disable icmp within the VN, ping between VMs should fail
-            1. Pick 2 VN from resource pool which have one VM in each
-            2. Create policy with icmp deny rule
-            3. Associate policy to both VN
-            4. Ping from one VM to another. Ping should fail
-        Pass criteria: Step 2,3 and 4 should pass
-        '''
-        vn1_name = get_random_name('vn1')
-        vn1_subnets = ['192.168.10.0/24']
-        policy_name = get_random_name('policy1')
-        rules = [
-            {
-                'direction': '<>', 'simple_action': 'deny',
-                'protocol': 'icmp',
-                'source_network': vn1_name,
-                'dest_network': vn1_name,
-            },
-        ]
-        policy_fixture = self.useFixture(
-            PolicyFixture(
-                policy_name=policy_name, rules_list=rules, inputs=self.inputs,
-                connections=self.connections))
-        vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
-        vn1_fixture.bind_policies(
-            [policy_fixture.policy_fq_name], vn1_fixture.vn_id)
-        self.addCleanup(vn1_fixture.unbind_policies,
-                        vn1_fixture.vn_id, [policy_fixture.policy_fq_name])
-        assert vn1_fixture.verify_on_setup()
-
-        vn1_vm1_name = get_random_name('vn1_vm1')
-        vn1_vm2_name = get_random_name('vn1_vm2')
-        vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name)
-        vm2_fixture = self.create_vm(vn1_fixture, vn1_vm2_name)
-        vm1_fixture.wait_till_vm_is_up()
-        vm2_fixture.wait_till_vm_is_up()
-        if vm1_fixture.ping_to_ip(vm2_fixture.vm_ip):
-            self.logger.error(
-                'Ping from %s to %s passed,expected it to fail' %
-                (vm1_fixture.vm_name, vm2_fixture.vm_name))
-            self.logger.info('Doing verifications on the fixtures now..')
-            assert vm1_fixture.verify_on_setup()
-            assert vm2_fixture.verify_on_setup()
-        return True
-    # end test_policy_to_deny
 
     @preposttest_wrapper
     def test_policy_with_multi_vn_in_vm(self):
@@ -321,8 +157,16 @@ class TestBasicPolicyConfig(BasePolicyTest):
         self.nova_h.wait_till_vm_is_up(vm2_fixture.vm_obj)
         # For multi-vn vm, configure ip address for 2nd interface
         multivn_vm_ip_list = vm1_fixture.vm_ips
-        intf_conf_cmd = "ifconfig eth1 %s netmask 255.255.255.0" % multivn_vm_ip_list[
-            1]
+        interfaces = vm1_fixture.get_vm_interface_list()
+        interface1 = vm1_fixture.get_vm_interface_list(ip=multivn_vm_ip_list[0])[0]
+        interfaces.remove(interface1)
+        interface2 = interfaces[0]
+        if 'dual' == self.inputs.get_af():
+            intf_conf_cmd = "ifconfig %s inet6 add %s" % (interface2,
+                                       multivn_vm_ip_list[3])
+        else:
+            intf_conf_cmd = "ifconfig %s %s netmask 255.255.255.0" % (interface2,
+                                       multivn_vm_ip_list[1])
         vm_cmds = (intf_conf_cmd, 'ifconfig -a')
         for cmd in vm_cmds:
             cmd_to_output = [cmd]
@@ -339,25 +183,29 @@ class TestBasicPolicyConfig(BasePolicyTest):
         self.logger.info(
             "Ping from multi-vn vm to vm2, with no allow rule in the VN where default gw is part of, traffic should fail")
         result = vm1_fixture.ping_with_certainty(
-            vm2_fixture.vm_ip,
-            expectation=False)
+            expectation=False,dst_vm_fixture=vm2_fixture)
         assertEqual(result, True, "ping passed which is not expected")
         # Configure VM to reroute traffic to interface belonging to different
         # VN
         self.logger.info(
             "Direct traffic to gw which is part of VN with allow policy to destination VN, traffic should pass now")
-        i = ' route add -net %s netmask 255.255.255.0 gw %s dev eth1' % (
-            vn3_subnets[0].split('/')[0], multivn_vm_ip_list[1])
-        cmd_to_output = [i]
+        cmd_to_output = []
+        if 'dual' == self.inputs.get_af():
+            cmd = ' route add -net %s netmask 255.255.255.0 gw %s dev %s' % (
+                    vn3_subnets[0].split('/')[0], multivn_vm_ip_list[2], interface2)
+            cmd_to_output.append(' ip -6 route add %s dev %s' % (vn3_subnets[1], interface2))
+        else:
+            cmd = ' route add -net %s netmask 255.255.255.0 gw %s dev %s' % (
+                vn3_subnets[0].split('/')[0], multivn_vm_ip_list[1], interface2)
+        cmd_to_output.append(cmd)
         vm1_fixture.run_cmd_on_vm(cmds=cmd_to_output, as_sudo=True)
-        output = vm1_fixture.return_output_cmd_dict[i]
+        output = vm1_fixture.return_output_cmd_dict[cmd]
         # Ping test from multi-vn vm to peer vn, result will be based on action
         # defined in policy attached to VN which has the default gw for VM
         self.logger.info(
             "Ping from multi-vn vm to vm2, with allow rule in the VN where network gw is part of, traffic should pass")
         result = vm1_fixture.ping_with_certainty(
-            vm2_fixture.vm_ip,
-            expectation=True)
+            expectation=True,dst_vm_fixture=vm2_fixture)
         assertEqual(result, True, "ping failed which is not expected")
         return True
     # end test_policy_with_multi_vn_in_vm
@@ -463,85 +311,61 @@ class TestBasicPolicyConfig(BasePolicyTest):
 
     # end test_policy_protocol_summary
 
-# end of class TestBasicPolicyConfig
-
-
-class TestBasicPolicyNegative(BasePolicyTest):
-
-    '''Negative tests'''
-
-    _interface = 'json'
-
-    @classmethod
-    def setUpClass(cls):
-        super(TestBasicPolicyNegative, cls).setUpClass()
-
-    def runTest(self):
-        pass
-
-    @test.attr(type=['sanity','ci_sanity', 'vcenter'])
     @preposttest_wrapper
-    def test_remove_policy_with_ref(self):
-        ''' This tests the following scenarios.
-           1. Test to validate that policy removal will fail when it referenced with VN.
-           2. validate vn_policy data in api-s against quantum-vn data, when created and unbind policy from VN thru quantum APIs.
-           3. validate policy data in api-s against quantum-policy data, when created and deleted thru quantum APIs.
-        '''
-        vn1_name = 'vn4'
-        vn1_subnets = ['10.1.1.0/24']
-        policy_name = 'policy1'
+    def test_policy_source_dest_cidr(self):
+        '''Test CIDR as match criteria for source and destination
+        1)Create vn and 3 vm's
+        2)Create policy with deny traffic and pass CIDR as source and destination 
+        3)Ping between vm1 and vm2 .Ping should fail 
+        4)ping between vm1 and vm3 .Ping should pass'''
+        vn1_name = get_random_name('vn1')
+        vn1_subnets = ['192.168.10.0/24']
+        policy_name = get_random_name('policy1')
+        vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
+        assert vn1_fixture.verify_on_setup()
+        vn1_vm1_name = get_random_name('vn1_vm1')
+        vn1_vm2_name = get_random_name('vn1_vm2')
+        vn1_vm3_name = get_random_name('vn1_vm3')
+        vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name)
+        vm2_fixture = self.create_vm(vn1_fixture, vn1_vm2_name)
+        vm3_fixture = self.create_vm(vn1_fixture, vn1_vm3_name)
+        vm1_fixture.wait_till_vm_is_up()
+        vm2_fixture.wait_till_vm_is_up()
+        vm3_fixture.wait_till_vm_is_up()
         rules = [
             {
-                'direction': '<>', 'simple_action': 'pass',
+                'direction': '<>', 'simple_action': 'deny',
                 'protocol': 'icmp',
-                'source_network': vn1_name,
-                'dest_network': vn1_name,
+                'source_subnet': vm1_fixture.vm_ip + '/32',
+                'dest_subnet': vm2_fixture.vm_ip + '/32',
             },
         ]
         policy_fixture = self.useFixture(
             PolicyFixture(
-                policy_name=policy_name,
-                rules_list=rules,
-                inputs=self.inputs,
+                policy_name=policy_name, rules_list=rules, inputs=self.inputs,
                 connections=self.connections))
-        vn1_fixture = self.useFixture(
-            VNFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_name=vn1_name,
-                inputs=self.inputs,
-                subnets=vn1_subnets,
-                policy_objs=[
-                    policy_fixture.policy_obj]))
-        assert vn1_fixture.verify_on_setup()
-        ret = policy_fixture.verify_on_setup()
-        if ret['result'] == False:
-            self.logger.error(
-                "Policy %s verification failed after setup" % policy_name)
-            assert ret['result'], ret['msg']
+        vn1_fixture.bind_policies(
+            [policy_fixture.policy_fq_name], vn1_fixture.vn_id)
+        self.addCleanup(vn1_fixture.unbind_policies,
+                        vn1_fixture.vn_id, [policy_fixture.policy_fq_name])
+        err_msg_on_pass = 'Ping from %s to %s passed,expected it to Fail' % (
+                                        vm1_fixture.vm_name,vm2_fixture.vm_name)
+        err_msg_on_fail = 'Ping from %s to %s failed,expected it to Pass' % (
+                                        vm1_fixture.vm_name,vm3_fixture.vm_name)
+        assert not vm1_fixture.ping_to_ip(vm2_fixture.vm_ip),err_msg_on_pass
+        self.logger.debug('Verify packets are dropped by policy')
+        vm_node_ip = vm1_fixture.vm_node_ip
+        cmd= " flow -l | grep -A3 %s | grep -A3 %s | grep 'Action:D(Policy)' " %(
+                                                vm2_fixture.vm_ip,vm1_fixture.vm_ip)
+        output = self.inputs.run_cmd_on_server(vm_node_ip,cmd,username='root',password='c0ntrail123',
+                                               container='agent')
+        assert output,'Packets are not dropped by policy rule'
+        assert vm1_fixture.ping_to_ip(vm3_fixture.vm_ip),err_msg_on_fail
+        self.logger.info('Ping from %s to %s failed,expected to fail.Test passed' %
+            (vm1_fixture.vm_name, vm2_fixture.vm_name))
+    #end test_policy_source_dest_cidr
 
-        self.logger.info(
-            "Done with setup and verification, moving onto test ..")
-        # try to remove policy which  was referenced with VN.
-        policy_removal = True
-        pol_id = None
-        if self.quantum_h:
-            policy_removal = self.quantum_h.delete_policy(policy_fixture.get_id())
-        else:
-            try:
-                self.vnc_lib.network_policy_delete(id=policy_fixture.get_id())
-            except Exception as e:
-                policy_removal = False
-        self.assertFalse(
-            policy_removal,
-            'Policy removal succeed as not expected since policy is referenced with VN')
-        #assert vn1_fixture.verify_on_setup()
-        # policy_fixture.verify_policy_in_api_server()
-        return True
-    # end test_remove_policy_with_ref
-
-# end of class TestBasicPolicyNegative
-
+# end of class TestBasicPolicyConfig
 
 class TestBasicPolicyRouting(BasePolicyTest):
 
@@ -761,138 +585,84 @@ class TestBasicPolicyRouting(BasePolicyTest):
 
 # end of class TestBasicPolicyRouting
 
-
-class TestBasicPolicyModify(BasePolicyTest):
-
-    '''Policy modification related tests'''
-
-    _interface = 'json'
-
+class TestBasicPolicyIpv4v6(test_policy_basic.TestBasicPolicy):
     @classmethod
     def setUpClass(cls):
-        super(TestBasicPolicyModify, cls).setUpClass()
+        super(TestBasicPolicyIpv4v6, cls).setUpClass()
+        cls.inputs.set_af(af_test)
 
-    def runTest(self):
-        pass
+    def is_test_applicable(self):
+        if self.inputs.orchestrator == 'vcenter' and not self.orch.is_feature_supported('ipv6'):
+            return(False, 'Skipping IPv6 Test on vcenter setup')
+        if not self.connections.orch.is_feature_supported('ipv6'):
+            return(False, 'IPv6 tests not supported in this environment ')
+        return (True, None)
 
-    @test.attr(type=['sanity', 'ci_sanity', 'vcenter'])
+    @test.attr(type=['sanity', 'quick_sanity'])
+    @preposttest_wrapper
+    def test_policy(self):
+        super(TestBasicPolicyIpv4v6, self).test_policy()
+
+    @test.attr(type=['sanity', 'quick_sanity'])
+    @preposttest_wrapper
+    def test_policy_to_deny(self):
+        super(TestBasicPolicyIpv4v6, self).test_policy_to_deny()
+
+class TestBasicPolicyNegativeIpv4v6(test_policy_basic.TestBasicPolicyNegative):
+    @classmethod
+    def setUpClass(cls):
+        super(TestBasicPolicyNegativeIpv4v6, cls).setUpClass()
+        cls.inputs.set_af(af_test)
+
+    def is_test_applicable(self):
+        if self.inputs.orchestrator == 'vcenter' and not self.orch.is_feature_supported('ipv6'):
+            return(False, 'Skipping IPv6 Test on vcenter setup')
+        if not self.connections.orch.is_feature_supported('ipv6'):
+            return(False, 'IPv6 tests not supported in this environment ')
+        return (True, None)
+
+    @test.attr(type=['sanity'])
+    @preposttest_wrapper
+    def test_remove_policy_with_ref(self):
+        super(TestBasicPolicyNegativeIpv4v6, self).test_remove_policy_with_ref()
+
+class TestBasicPolicyModifyIpv4v6(test_policy_basic.TestBasicPolicyModify):
+    @classmethod
+    def setUpClass(cls):
+        super(TestBasicPolicyModifyIpv4v6, cls).setUpClass()
+        cls.inputs.set_af(af_test)
+
+    def is_test_applicable(self):
+        if self.inputs.orchestrator == 'vcenter' and not self.orch.is_feature_supported('ipv6'):
+            return(False, 'Skipping IPv6 Test on vcenter setup')
+        if not self.connections.orch.is_feature_supported('ipv6'):
+            return(False, 'IPv6 tests not supported in this environment ')
+        return (True, None)
+
+    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_policy_modify_vn_policy(self):
-        """ Configure policies based on topology;
-        """
-        ###
-        # Get config for test from topology
-        # very simple topo will do, one vn, one vm, one policy, 3 rules
-        from . import sdn_single_vm_policy_topology
-        topology_class_name = sdn_single_vm_policy_topology.sdn_single_vm_policy_config
+        super(TestBasicPolicyModifyIpv4v6, self).test_policy_modify_vn_policy()
 
-        self.logger.info(
-            "Scenario for the test used is: %s" %
-            (topology_class_name))
-        # set project name
-        try:
-            # provided by wrapper module if run in parallel test env
-            topo = topology_class_name(
-                project=self.project.project_name,
-                username=self.project.username,
-                password=self.project.password)
-        except NameError:
-            topo = topology_class_name()
-        ###
-        # Test setup: Configure policy, VN, & VM
-        # return {'result':result, 'msg': err_msg, 'data': [self.topo, config_topo]}
-        # Returned topo is of following format:
-        # config_topo= {'policy': policy_fixt, 'vn': vn_fixture, 'vm': vm_fixture}
-        setup_obj = self.useFixture(
-            sdnTopoSetupFixture(
-                self.connections,
-                topo))
-        out = setup_obj.topo_setup()
-        assertEqual(out['result'], True, out['msg'])
-        if out['result']:
-            topo, config_topo = out['data']
-        ###
-        # Verify [and assert on fail] after setup
-        # Calling system policy verification, pick any policy fixture to
-        # access fixture verification
-        policy_name = topo.policy_list[0]
-        system_vna_verify_policy(
-            self,
-            config_topo['policy'][policy_name],
-            topo,
-            'setup')
-        ###
-        # Test procedure:
-        # Test adding new policy to VN's exiting policy list
-        state = "add policy: "
-        test_vm = topo.vmc_list[0]
-        test_vn = topo.vn_of_vm[test_vm]
-        # Init test data, take backup of current topology
-        initial_vn_policy_list = copy.copy(topo.vn_policy[test_vn])
-        new_policy_to_add = policy_test_utils.get_policy_not_in_vn(
-            initial_vn_policy_list,
-            topo.policy_list)
-        if not new_policy_to_add:
-            result = 'False'
-            msg = "test %s cannot be run as required config not available in topology; aborting test"
-            self.logger.info(msg)
-            assertEqual(result, True, msg)
-        initial_policy_vn_list = copy.copy(topo.policy_vn[new_policy_to_add])
-        new_vn_policy_list = copy.copy(initial_vn_policy_list)
-        new_policy_vn_list = copy.copy(initial_policy_vn_list)
-        new_vn_policy_list.append(new_policy_to_add)
-        new_policy_vn_list.append(test_vn)
-        test_vn_fix = config_topo['vn'][test_vn]
-        test_vn_id = test_vn_fix.vn_id
-        # configure new policy
-        config_topo['policy'][new_policy_to_add] = self.useFixture(
-            PolicyFixture(
-                policy_name=new_policy_to_add,
-                rules_list=topo.rules[new_policy_to_add],
-                inputs=self.inputs,
-                connections=self.connections))
-        # get new policy_set to be pushed for the vn
-        test_policy_fq_names = []
-        for policy in new_vn_policy_list:
-            name = config_topo['policy'][policy].policy_fq_name
-            test_policy_fq_names.append(name)
-        self.logger.info(
-            "adding policy %s to vn %s" %
-            (new_policy_to_add, test_vn))
-        test_vn_fix.bind_policies(test_policy_fq_names, test_vn_id)
-        # wait for tables update before checking after making changes to system
-        time.sleep(5)
-        self.logger.info(
-            "new policy list of vn %s is %s" %
-            (test_vn, new_vn_policy_list))
-        # update expected topology with this new info for verification
-        topo.vn_policy[test_vn] = new_vn_policy_list
-        topo.policy_vn[new_policy_to_add] = new_policy_vn_list
-        system_vna_verify_policy(
-            self,
-            config_topo['policy'][new_policy_to_add],
-            topo,
-            state)
-        # Test unbinding all policies from VN
-        state = "unbinding all policies"
-        test_vn_fix.unbind_policies(test_vn_id)
-        # wait for tables update before checking after making changes to system
-        time.sleep(5)
-        current_vn_policy_list = new_vn_policy_list
-        new_vn_policy_list = []
-        self.logger.info(
-            "new policy list of vn %s is %s" %
-            (test_vn, new_vn_policy_list))
-        # update expected topology with this new info for verification
-        topo.vn_policy[test_vn] = new_vn_policy_list
-        for policy in current_vn_policy_list:
-            topo.policy_vn[policy].remove(test_vn)
-        system_vna_verify_policy(
-            self,
-            config_topo['policy'][new_policy_to_add],
-            topo,
-            state)
-        return True
-    # end test_policy_modify
+class TestBasicPolicyConfigIpv4v6(TestBasicPolicyConfig):
+    @classmethod
+    def setUpClass(cls):
+        super(TestBasicPolicyConfigIpv4v6, cls).setUpClass()
+        cls.inputs.set_af(af_test)
 
-# end of class TestBasicPolicyModify
+    def is_test_applicable(self):
+        if self.inputs.orchestrator == 'vcenter' and not self.orch.is_feature_supported('ipv6'):
+            return(False, 'Skipping IPv6 Test on vcenter setup')
+        return (True, None)
+
+class TestBasicPolicyRoutingIpv4v6(TestBasicPolicyRouting):
+    @classmethod
+    def setUpClass(cls):
+        super(TestBasicPolicyRoutingIpv4v6, cls).setUpClass()
+        cls.inputs.set_af(af_test)
+
+    def is_test_applicable(self):
+        if self.inputs.orchestrator == 'vcenter' and not self.orch.is_feature_supported('ipv6'):
+            return(False, 'Skipping IPv6 Test on vcenter setup')
+        return (True, None)
+

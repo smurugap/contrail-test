@@ -32,7 +32,6 @@ class VpcSanityTests(base.VpcBaseTest):
     def setUpClass(cls):
         super(VpcSanityTests, cls).setUpClass()
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_create_delete_vpc(self):
         """Validate create VPC """
@@ -159,7 +158,6 @@ class VpcSanityTests1(base.VpcBaseTest):
     def setUpClass(cls):
         super(VpcSanityTests1, cls).setUpClass()
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_acl_with_association(self):
         """Create ACL, associate it with a subnet, add and replace rules """
@@ -277,7 +275,6 @@ class VpcSanityTests1(base.VpcBaseTest):
         return result
     # end test_acl_with_association
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_security_group(self):
         """Create Security Groups, Add and Delete Rules """
@@ -564,7 +561,6 @@ class VpcSanityTests1(base.VpcBaseTest):
         # Just Read the existing vpc as a fixture
         vpc1_contrail_fixture = self.useFixture(
             ProjectFixture(
-                vnc_lib_h=self.vnc_lib,
                 project_name=vpc1_id,
                 username=self.admin_inputs.stack_user,
                 password=self.admin_inputs.stack_password,
@@ -643,7 +639,6 @@ class VpcSanityTests2(base.VpcBaseTest):
         super(VpcSanityTests2, cls).setUpClass()
 
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_ping_between_instances(self):
         """Test ping between instances in subnet """
@@ -691,7 +686,6 @@ class VpcSanityTests2(base.VpcBaseTest):
         return True
     # end test_ping_between_instances
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_subnet_create_delete(self):
         """Validate create subnet in vpc with valid CIDR """
@@ -849,7 +843,6 @@ class VpcSanityTests3(base.VpcBaseTest):
     def setUpClass(cls):
         super(VpcSanityTests3, cls).setUpClass()
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
     def test_allocate_floating_ip(self):
         """Allocate a floating IP"""
@@ -980,7 +973,6 @@ class VpcSanityTests3(base.VpcBaseTest):
         # Just Read the existing vpc as a fixture
         vpc1_contrail_fixture = self.useFixture(
             ProjectFixture(
-                vnc_lib_h=self.vnc_lib,
                 project_name=vpc1_id,
                 username=self.admin_inputs.stack_user,
                 password=self.admin_inputs.stack_password,

@@ -67,7 +67,7 @@ def comp_rules_from_policy_to_system(self):
                             break
                         else:
                             pass
-                        self.logger.info("Order of the policy's list:%s" %
+                        self.logger.debug("Order of the policy's list:%s" %
                                          (policys_list))
                         user_rules_tx = {}
                         rules_by_vn = {}
@@ -81,7 +81,7 @@ def comp_rules_from_policy_to_system(self):
                             policy_detail = self.vnc_lib.network_policy_read(fq_name=[u'default-domain',
                                                  unicode(project_names[pr]), unicode(policy)])
 
-                            self.logger.info(
+                            self.logger.debug(
                                 "%s, %s, %s, %s, %s" %
                                 (policy_detail,
                                  policys_list,
@@ -164,13 +164,13 @@ def comp_rules_from_policy_to_system(self):
                             fq_name = [project_domains[pr],
                                        project_names[pr], vn]
                             fq_vn = ':'.join(fq_name)
-                            self.logger.info(
+                            self.logger.debug(
                                 "Traslation of quantum rules to ACES format")
                             updated_quantum_rules, uni_rule = tx_quantum_rules_to_aces(
                                 no_of_rules, fq_vn)
                             user_rules_tx[policy] = updated_quantum_rules
                             # Step 5b: Aggregate rules by network
-                            self.logger.info("vn is %s, vn_policy is %s" %
+                            self.logger.debug("vn is %s, vn_policy is %s" %
                                              (vn, policy))
                             rules_by_vn[vn] += user_rules_tx[policy]
 
@@ -187,7 +187,7 @@ def comp_rules_from_policy_to_system(self):
                                 rules_by_vn[vn])
                         self.logger.debug("VN: %s, expected ACE's is " % (vn))
                         for r in rules_by_vn[vn]:
-                            self.logger.info("%s" %
+                            self.logger.debug("%s" %
                                              (json.dumps(r, sort_keys=True)))
                         # end building VN ACE's from user rules
 
@@ -198,13 +198,13 @@ def comp_rules_from_policy_to_system(self):
                         project_name = project_names[pr]
                         result, msg = comp_user_rules_to_system_rules(
                             self, vn, rules_by_all_vn, policys_list, pro_vm_list, vm_list, vm, project_name)
-                        self.logger.info(
+                        self.logger.debug(
                             "Verify policy rules for other vn if it is present")
                         old_vn = vn
                     else:
                         pass
         else:
-            self.logger.info(
+            self.logger.debug(
                 "Skipping the policy rule comparison since VM's are not exist for selected project:%s" %
                 (project_names[pr]))
     self.logger.info(
@@ -297,23 +297,7 @@ def tx_quantum_rules_to_aces(no_of_rules, fq_vn):
             rule['proto_l'] = {'max': str(rule['proto_l']),
                                'min': str(rule['proto_l'])}
 
-    # step 3: if the rules are  unidirectional
-    for rule in user_rules_tx:
-        if rule['direction'] == '>':
-            if (rule['src'] != rule['dst']):
-                uni_rule = copy.deepcopy(rule)
-                # update newly copied rule: swap address and insert 'any' to
-                # protocol and src/dst ports
-                uni_rule['src'], uni_rule['dst'] = uni_rule[
-                    'dst'], uni_rule['src']
-                uni_rule['src_port_l'], uni_rule['dst_port_l'] = {
-                    'max': '65535', 'min': '0'}, {'max': '65535', 'min': '0'}
-                uni_rule['proto_l'] = {'max': '255', 'min': '0'}
-                uni_rule['simple_action'] = 'deny'
-                uni_rule['action_l'] = ['deny']
-                break
-
-    # step 4: expanding rules if bidir rule
+    # step 3: expanding rules if bidir rule
     for rule in user_rules_tx:
         if rule['direction'] == '<>':
             rule['direction'] = '>'
@@ -370,8 +354,8 @@ def comp_user_rules_to_system_rules(
     cn_vna_rules_by_vn = {}  # {'vn1':[{...}, {..}], 'vn2': [{..}]}
     err_msg = {}  # To capture error {compute: {vn: error_msg}}
     for compNode in self.inputs.compute_ips:
-        self.logger.info("Verify rules expected in CN if VN-VM in CN")
-        self.logger.info("CN: %s, Check for expected data" % (compNode))
+        self.logger.debug("Verify rules expected in CN if VN-VM in CN")
+        self.logger.debug("CN: %s, Check for expected data" % (compNode))
         inspect_h = self.agent_inspect[compNode]
         got_vm_name = inspect_h.get_vna_tap_interface_by_vm(
             str(all_vms[vm].id))
@@ -386,7 +370,8 @@ def comp_user_rules_to_system_rules(
                 cn_vna_rules_by_vn[vn] = []
             # compare with test input & assert on failure
             ret = policy_test_utils.compare_rules_list(
-                rules_by_all_vn, cn_vna_rules_by_vn[vn])
+                rules_by_all_vn, cn_vna_rules_by_vn[vn],
+                logger=self.logger)
             if ret:
                 result = ret['state']
                 msg = ret['msg']
@@ -401,11 +386,11 @@ def comp_user_rules_to_system_rules(
                     self.logger.debug(r)
                 result = False
             else:
-                self.logger.info(
+                self.logger.debug(
                     "CN: %s, VN: %s, result of expected rules check passed" %
                     (compNode, vn))
                 self.logger.info(
-                    "Done the rule verification for vm:%s with attached policy:%s and vn:%s " %
+                    "Validated the rules for VM:%s with attached policy:%s and vn:%s " %
                     (vm_list[vm], policy, vn))
         else:
             pass
@@ -450,7 +435,9 @@ def tx_quntum_def_aces_to_system(test_vn, user_rules_tx, uni_rule):
     last_rule['simple_action'] = 'pass'
     last_rule['action_l'] = [{'simple_action': 'pass', 'gateway_name': None,
                                 'apply_service': [], 'mirror_to': None,
-                                'assign_routing_instance': None}]
+                                'assign_routing_instance': None,
+                                'log': False, 'alert': False,
+                                'qos_action': None}]
     last_rule['src'], last_rule['dst'] = 'any', 'any'
 
     # check any rule exist in policy :
@@ -638,7 +625,7 @@ def check_5tuple_in_rules(rule, rules):
     return (match, rules.index(r))
 # end check_5tuple_in_rules
 
-def _create_n_policy_n_rules(self, number_of_policy, valid_rules, number_of_dummy_rules, option='quantum'):
+def _create_n_policy_n_rules(self, number_of_policy, valid_rules, number_of_dummy_rules, option='quantum', verify=True):
     ''' Create n number of policy & n number of rules
     created policy will be policy1,policy2,policy3...policyn so on
     Sample rules_list:
@@ -662,7 +649,7 @@ def _create_n_policy_n_rules(self, number_of_policy, valid_rules, number_of_dumm
     y = 80
     rules_list = []
     policy_name = 'policy'
-    self.logger.info('Creating %d dummy rules' % (number_of_dummy_rules))
+    self.logger.debug('Creating %d dummy rules' % (number_of_dummy_rules))
     total_policy = number_of_policy
     while len(rules_list) < number_of_dummy_rules:
         if option == 'quantum':
@@ -680,22 +667,27 @@ def _create_n_policy_n_rules(self, number_of_policy, valid_rules, number_of_dumm
                 PolicyRuleType(
                     direction='<>', protocol='udp', dst_addresses=[AddressType(virtual_network='any')],
                     src_addresses=[AddressType(virtual_network='any')], dst_ports=[PortType(x, x)],
-                    simple_action='deny', src_ports=[PortType(y, y)]),
+                    action_list=ActionListType(simple_action='deny'),
+                    src_ports=[PortType(y, y)]),
             ]
         rules_list.append(rules[0])
         x += 1
         y += 1
     # end while
         # append valid rule at the end
-    self.logger.info('Appending %d valid rules to end of the rule list' %
+    self.logger.debug('Appending %d valid rules to end of the rule list' %
                      (len(valid_rules)))
     for rule in valid_rules:
         rules_list.append(rule)
-    self.logger.info('Using policy fixture to create %d policy with %d rules' %
+    self.logger.debug('Using policy fixture to create %d policy with %d rules' %
                      (number_of_policy, len(rules_list)))
     number_of_policy += 1
     policy_objs_list = []
     for i in range(1, number_of_policy):
+        if i > 1:
+            for j in range(0, number_of_dummy_rules):
+                rules_list[j]['src_ports'] = (rules_list[j]['src_ports'][0]+(number_of_dummy_rules + 5) , rules_list[j]['src_ports'][1]+(number_of_dummy_rules + 5))
+                rules_list[j]['dst_ports'] = (rules_list[j]['dst_ports'][0]+(number_of_dummy_rules + 5) , rules_list[j]['dst_ports'][1]+(number_of_dummy_rules + 5))
         try:
             if option == 'quantum':
                 policy_fixture = self.useFixture(
@@ -713,18 +705,16 @@ def _create_n_policy_n_rules(self, number_of_policy, valid_rules, number_of_dumm
 
         except Exception as e:
             self.logger.error(
-                'Exception occured while creating %d policy with %d rules' %
-                (total_policy, len(rules_list)))
+                'Exception %s occured while creating %d policy with %d rules' %
+                (e, total_policy, len(rules_list)))
             self.assertTrue(
                 False, 'Exception occured while creating %d policy with %d rules' %
                 (total_policy, len(rules_list)))
         if option == 'quantum':
-            self.logger.info('Created policy %s' %
-                             (policy_fixture.policy_fq_name))
             policy_objs_list.append(policy_fixture.policy_obj)
-            policy_fixture.verify_policy_in_api_server()
+            if verify == True:
+                policy_fixture.verify_policy_in_api_server()
         else:
-            self.logger.info('Created policy %s' % (policy_fixture._obj.name))
             policy_objs_list.append(policy_fixture._obj)
             policy_read = self.vnc_lib.network_policy_read(
                 id=str(policy_fixture._obj.uuid))

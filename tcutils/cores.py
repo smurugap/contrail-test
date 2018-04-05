@@ -3,32 +3,22 @@
 import sys
 import traceback
 import unittest
+import random
+from time import sleep
 from functools import wraps
 
 from fabric.api import run, cd
+from fabric.contrib.files import exists
 from fabric.context_managers import settings, hide
+from paramiko.ssh_exception import ChannelException
+
+from tcutils.util import retry
 
 CORE_DIR = '/var/crashes'
 
 
 class TestFailed(Exception):
     pass
-
-
-def get_node_ips(inputs):
-    """Get the list of nodes ip address in the test setup.
-    """
-    node_ips = []
-    nodes = ['cfgm_ips', 'bgp_ips', 'collector_ips',
-             'webui_ip', 'compute_ips']
-    if inputs.orchestrator == 'openstack':
-        nodes += ['openstack_ip']
-    for node in nodes:
-        ip = inputs.__getattribute__(node)
-        if type(ip) is str:
-            ip = [ip]
-        node_ips = list(set(node_ips).union(set(ip)))
-    return node_ips
 
 def get_cores(inputs):
     '''Get the list of cores in all the nodes in the test setup
@@ -37,23 +27,27 @@ def get_cores(inputs):
     for host in inputs.host_ips:
         username = inputs.host_data[host]['username']
         password = inputs.host_data[host]['password']
-        core = get_cores_node(host, username, password)
+        core = get_cores_node(host, username, password, logger=inputs.logger)
         if core:
             cores.update({host: core.split()}) 
     # end for
     return cores
         
 
-def get_cores_node(node_ip, user, password):
+def get_cores_node(node_ip, user, password, logger=None):
     """Get the list of cores in one of the nodes in the test setup.
     """
-    cores = {}
+    core = None
     with hide('everything'):
-        with settings(
-            host_string='%s@%s' % (user, node_ip), password=password,
-                warn_only=True, abort_on_prompts=False):
-            with cd(CORE_DIR):
-                core = run("ls core.* 2>/dev/null")
+        try:
+            with settings(
+                host_string='%s@%s' % (user, node_ip), password=password,
+                    warn_only=True, abort_on_prompts=False):
+                if exists(CORE_DIR):
+                    with cd(CORE_DIR):
+                        (ret_val, core) = _run("ls core.* 2>/dev/null")
+        except Exception as e:
+            logger.exception(e)
     return core
 
 
@@ -86,17 +80,29 @@ def get_service_crashes(inputs):
     return crashes
                  
 
+@retry(tries=10, delay=3)
+def _run(cmd):
+    try:
+        output = run(cmd)
+    except ChannelException, e:
+        # Handle too many concurrent sessions
+        if 'Administratively prohibited' in str(e):
+            sleep(random.randint(1,5))
+            return (False, None)
+    return (True, output)
+# end _run
+
 def get_service_crashes_node(node_ip, user, password):
     """Get the list of services crashed in one of the nodes in the test setup.
     """
-    crashes = {}
+    crash = None
+    services = []
     with hide('everything'):
         with settings(
             host_string='%s@%s' % (user, node_ip), password=password,
                 warn_only=True, abort_on_prompts=False):
-            crash = run("contrail-status")
-    services = []
-    if "Failed service list" in crash:
+            (ret_val, crash) = _run("contrail-status")
+    if crash and "Failed service list" in crash:
         for line in crash.split("\n"):
             if "Failed service list" in line:
                 # dont iterate beyond this to look for service: status

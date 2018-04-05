@@ -8,9 +8,9 @@ LOG.basicConfig(format='%(levelname)s: %(message)s', level=LOG.DEBUG)
 
 class VNCApiInspect (VerificationUtilBase):
 
-    def __init__(self, ip, logger=LOG, args=None):
+    def __init__(self, ip, inputs, protocol='http', logger=LOG):
         super(VNCApiInspect, self).__init__(
-            ip, 8082, logger=logger, args=args)
+            ip, inputs.api_server_port, logger=logger, args=inputs, protocol=protocol)
         self._cache = {
             'domain': {},
             'project': {},
@@ -29,12 +29,22 @@ class VNCApiInspect (VerificationUtilBase):
             'secgrp': {},
             'si': {},
             'st': {},
+            'pt': {},
             'dns': {},
             'dns_rec': {},
             'lb_pool': {},
             'lb_vip': {},
             'lb_member': {},
             'lb_healthmonitor': {},
+            'svc_hc': {},
+            'bgpaas': {},
+            'lr': {},
+            'table': {},
+            'loadbalancer': {},
+            'api-access-list': {},
+            'alarm':{},
+            'bridge_domain': {},
+            'slo': {}
         }
 
     def update_cache(self, otype, fq_path, d):
@@ -56,12 +66,53 @@ class VNCApiInspect (VerificationUtilBase):
                     return p
         return None
 
+    def get_cs_bridge_domain(self, bd_name=None, refresh=False):
+        '''
+            method: get_cs_bridge_domain finds a bridge domain by name
+            returns None if not found else CsBridgeDomainResult object
+
+        '''
+        d = self.try_cache('bridge_domain', [bd_name], refresh)
+        if not d:
+            # cache miss
+            bds = self.dict_get('bridge-domains')
+            mybd = filter(lambda x: x['fq_name'][-1] == bd_name,
+                           bds['bridge-domains'])
+            if mybd:
+                dd = self.dict_get(mybd[-1]['href'])
+            # cache set
+            if dd:
+                d = CsBridgeDomainResult(dd)
+                self.update_cache('bridge_domain', [bd_name], d)
+        return d
+
+    def get_cs_slo(self, slo_uuid=None, slo_name=None):
+        '''
+            method: get_cs_slo finds a SLO by name or uuid
+            returns None if not found else CsSloResult object
+
+        '''
+        slo_result = None
+        if slo_uuid is not None:
+            slo = self.dict_get('security-logging-object/%s' % (slo_uuid))
+        elif slo_name is not None:
+            slos = self.dict_get('security-logging-objects')
+            myslo = filter(lambda x: x['fq_name'][-1] == slo_name,
+                           slos['security-logging-objects'])
+            if myslo:
+                slo = self.dict_get(myslo[-1]['href'])
+        if slo:
+            slo_result = CsSloResult(slo)
+        return slo_result
+
     def get_cs_domain(self, domain='default-domain', refresh=False):
         '''
             method: get_cs_domain find a domain by domin name
             returns CsDomainResult object, None if not found
 
         '''
+        if domain == 'Default':
+            domain = 'default-domain'
         d = self.try_cache('domain', [domain], refresh)
         if not d:
             # cache miss
@@ -171,7 +222,7 @@ class VNCApiInspect (VerificationUtilBase):
             try:
                 pp = self.dict_get('virtual-network/' + vn_id)
             except:
-                self.log.debug("Virtual Network ID: % not found", vn_id)
+                self.log.debug("Virtual Network ID: %s not found", vn_id)
 
             if pp:
                 p = CsVNResult(pp)
@@ -199,6 +250,16 @@ class VNCApiInspect (VerificationUtilBase):
                 self.update_cache('vn', [domain, project, vn], p)
         return p
 
+    def get_cs_vn_list(self):
+        '''
+        method: list_cs_vn list all virtual networks
+        returns None if not found else list of virtual network dict
+        '''
+        vns = self.dict_get('virtual-networks')
+        vns = vns.get('virtual-networks', [])
+        return [x['uuid'] for x in vns]
+    # end get_cs_vn_list
+
     # TODO
     def get_cs_vn_policys(self, project='admin',  domain='default-domain', vn='default-virtual-network', refresh=False):
         '''
@@ -208,7 +269,7 @@ class VNCApiInspect (VerificationUtilBase):
         '''
         vn_final_policy_list = []
         vn_attach_policy_list = {}
-        vn_obj = self.get_cs_vn(domain='default-domain',
+        vn_obj = self.get_cs_vn(domain=domain,
                                 project=project, vn=vn, refresh=True)
         if 'network_policy_refs' in vn_obj['virtual-network']:
             vn_pol = vn_obj['virtual-network']['network_policy_refs']
@@ -268,6 +329,15 @@ class VNCApiInspect (VerificationUtilBase):
         '''
 
     # end get_cs_fip_list
+
+    def get_cs_fip_pool_list(self):
+        fip_pools = self.dict_get('floating-ip-pools')
+        fip_pools = fip_pools.get('floating-ip-pools', [])
+        return [x['uuid'] for x in fip_pools]
+
+    def get_cs_fip_pool(self, fip_pool_id):
+        p = self.dict_get('floating-ip-pool/%s'%fip_pool_id)
+        return CsUseFipResult(p) if p else None
 
     def get_cs_fip(self, fip_id, refresh):
         '''
@@ -374,7 +444,7 @@ class VNCApiInspect (VerificationUtilBase):
 
         Returns the Virtual Machine Interface using virtual_machine_interfaces link in http://host/virtual-machine/<VM-ID>
         '''
-        p = self.try_cache('vmi', vm_id, refresh)
+        p = self.try_cache('vmi', vm_id, refresh) or []
         pp = []
         if not p:
             # cache miss
@@ -396,7 +466,7 @@ class VNCApiInspect (VerificationUtilBase):
 
         Returns the Instance-IP objects using virtual_machine_interfaces link of a VM
         '''
-        p = self.try_cache('iip', vm_id, refresh)
+        p = self.try_cache('iip', vm_id, refresh) or []
         pp = []
         if not p:
             # cache miss
@@ -475,7 +545,7 @@ class VNCApiInspect (VerificationUtilBase):
             Input will be of the form :
 {'route_target_list': [{'route_target_list': [{u'route-target': {u'_type': u'route-target', u'fq_name': [u'target:64512:914'], u'uuid': u'b1c0ef9a-cab8-4554-bfcb-74bf963c6a80', u'routing_instance_back_refs': [{u'to': [u'default-domain', u'admin', u'vn222', u'vn222'], u'href': u'http://10.204.216.38:8082/routing-instance/61983e45-dcdf-46d7-87f4-c434f874597f', u'attr': None, u'uuid': u'61983e45-dcdf-46d7-87f4-c434f874597f'}], u'href': u'http://10.204.216.38:8082/route-target/b1c0ef9a-cab8-4554-bfcb-74bf963c6a80', u'id_perms': {u'enable': True, u'uuid': {u'uuid_mslong': 12808500788346766676L, u'uuid_lslong': 13820268247724616320L}, u'created': None, u'description': None, u'last_modified': None, u'permissions': {u'owner': u'cloud-admin', u'owner_access': 7, u'other_access': 7, u'group': u'cloud-admin-group', u'group_access': 7}}, u'name': u'target:64512:914'}}]}]}
         '''
-        rt_list = rt_obj['route_target_list'][0]['route_target_list']
+        rt_list = rt_obj['route_target_list'][0].get('route_target_list', [])
         rt_names = []
         for rt in rt_list:
             rt_names.append(str(rt['route-target']['name']))
@@ -541,7 +611,66 @@ class VNCApiInspect (VerificationUtilBase):
                     pp = self.dict_get(mysi[0]['href'])
             if pp:
                 p = CsServiceInstanceResult(pp)
-                self.update_cache('secgrp', [domain, project, si], p)
+                self.update_cache('si', [domain, project, si], p)
+        return p
+
+    def get_cs_vmi_by_id(self, vmi_id, refresh=True):
+        '''
+            method: get_cs_vmi_by_id finds the VMI by id
+            returns None if not found, a dict w/ attrib. eg:
+
+        '''
+        p = self.try_cache_by_id('vmi', vmi_id, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('virtual-machine-interface/%s' % vmi_id)
+            if pp:
+                p = CsVirtualMachineInterfaceResult(pp)
+                self.update_cache('vmi', p.fq_name().split(':'), p)
+        return p
+
+    def get_cs_pt_by_id(self, pt_id, refresh=False):
+        '''
+            method: get_cs_pt_by_id finds the port-tuple by id
+            returns None if not found, a dict w/ attrib. eg:
+
+        '''
+        p = self.try_cache_by_id('pt', pt_id, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('port-tuple/%s' % pt_id)
+            if pp:
+                p = CsPortTupleResult(pp)
+                self.update_cache('pt', p.fq_name().split(':'), p)
+        return p
+
+    def get_cs_si_by_id(self, si_id, refresh=False):
+        '''
+            method: get_cs_si_by_id find a service instance by id
+            returns None if not found, a dict w/ attrib. eg:
+        '''
+        p = self.try_cache_by_id('si', si_id, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('service-instance/%s' %si_id)
+            if pp:
+                p = CsServiceInstanceResult(pp)
+                self.update_cache('si', p.fq_name().split(':'), p)
+        return p
+
+    def get_cs_st_by_id(self, st_id='', refresh=False):
+        '''
+        method: get_cs_st_by_id find a st
+        returns None if not found, a dict w/ attrib. eg:
+
+        '''
+        p = self.try_cache_by_id('st', st_id, refresh)
+        if not p and st_id:
+            # cache miss
+            pp = self.dict_get('service-template/' + st_id)
+            if pp:
+                p = CsServiceTemplateResult(pp)
+                self.update_cache('st', p.fq_name().split(':'), p)
         return p
 
     def get_cs_st(self, domain='default-domain', project='admin',
@@ -573,6 +702,17 @@ class VNCApiInspect (VerificationUtilBase):
             pp = CsGlobalVrouterConfigResult(gvr_config)
         return pp
 
+    def get_computes(self):
+        '''Get list of vrouter-agents'''
+        vrouters = CsVrouters(self.dict_get('virtual-routers?detail=True'))
+        vr_list = list()
+        for vrouter in vrouters:
+            vr = CsVrouter(vrouter)
+#            if vr.is_tor_agent() or vr.is_tsn():
+#                continue
+            vr_list.append(vr.ip)
+        return vr_list
+
     def get_secgrp_acls_href(self, domain='default-domain', project='admin',
                       secgrp='default-security-group', refresh=False):
         '''
@@ -597,16 +737,16 @@ class VNCApiInspect (VerificationUtilBase):
         returns None if not found, a dict w/ attrib. eg:
 
         '''
-        p = self.try_cache('lb_pool', pool_id, refresh)
+        p = self.try_cache_by_id('lb_pool', pool_id, refresh)
         if not p:
             # cache miss
             pp = self.dict_get('loadbalancer-pool/%s' % pool_id)
             if pp:
-                p = CsVMResult(pp)
-                self.update_cache('lb_pool', pool_id, p)
+                p = CsLbPool(pp)
+                self.update_cache('lb_pool', p.fq_name().split(':'), p)
         return p
 
-    def get_lb_vip(self, vip_id, refresh=True):
+    def get_lb_vip(self, vip_id, refresh=False):
         '''
         method: get_lb_vip find a lb vip
         returns None if not found, a dict w/ attrib. eg:
@@ -617,11 +757,11 @@ class VNCApiInspect (VerificationUtilBase):
             # cache miss
             pp = self.dict_get('virtual-ip/%s' % vip_id)
             if pp:
-                p = CsVMResult(pp)
-                self.update_cache('lb_vip', vip_id, p)
+                p = CsLbVip(pp)
+                self.update_cache('lb_vip', p.fq_name().split(':'), p)
         return p
 
-    def get_lb_member(self, member_id, refresh=True):
+    def get_lb_member(self, member_id, refresh=False):
         '''
         method: get_lb_member find a lb member
         returns None if not found, a dict w/ attrib. eg:
@@ -632,11 +772,11 @@ class VNCApiInspect (VerificationUtilBase):
             # cache miss
             pp = self.dict_get('loadbalancer-member/%s' % member_id)
             if pp:
-                p = CsVMResult(pp)
-                self.update_cache('lb_member', member_id, p)
+                p = CsLbMember(pp)
+                self.update_cache('lb_member', p.fq_name().split(':'), p)
         return p
 
-    def get_lb_healthmonitor(self, healthmonitor_id, refresh=True):
+    def get_lb_healthmonitor(self, healthmonitor_id, refresh=False):
         '''
         method: get_lb_healthmonitor find a lb healthmonitor
         returns None if not found, a dict w/ attrib. eg:
@@ -645,11 +785,109 @@ class VNCApiInspect (VerificationUtilBase):
         p = self.try_cache('lb_healthmonitor', healthmonitor_id, refresh)
         if not p:
             # cache miss
-            pp = self.dict_get('loadbalancer-healthmonitor/%s' % healthmonitor_id)
+            pp = self.dict_get('loadbalancer-healthmonitor/%s'%healthmonitor_id)
             if pp:
-                p = CsVMResult(pp)
-                self.update_cache('lb_healthmonitor', healthmonitor_id, p)
+                p = CsLbHealthMonitor(pp)
+                self.update_cache('lb_healthmonitor', p.fq_name().split(':'), p)
         return p
+
+    def get_lr(self, uuid, refresh=False):
+        p = self.try_cache_by_id('lr', uuid, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('logical-router/%s' % uuid)
+            if pp:
+                p = CsLogicalRouterResult(pp)
+                self.update_cache('lr', p.fq_name().split(':'), p)
+        return p
+
+    def get_route_table(self, uuid, refresh=False):
+        p = self.try_cache_by_id('table', uuid, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('route-table/%s' % uuid)
+            if pp:
+                p = CsTableResult(pp)
+                self.update_cache('table', p.fq_name().split(':'), p)
+        return p
+
+    def get_bgpaas(self, uuid, refresh=False):
+        p = self.try_cache_by_id('bgpaas', uuid, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('bgp-as-a-service/%s' % uuid)
+            if pp:
+                p = CsBGPaaSResult(pp)
+                self.update_cache('bgpaas', p.fq_name().split(':'), p)
+        return p
+
+    def get_service_health_check(self, uuid, refresh=False):
+        p = self.try_cache_by_id('svc_hc', uuid, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('service-health-check/%s' % uuid)
+            if pp:
+                p = CsHealthCheckResult(pp)
+                self.update_cache('svc_hc', p.fq_name().split(':'), p)
+        return p
+
+    def get_healthcheck_of_vmi(self, vmi_id):
+        obj = self.dict_get('virtual-machine-interface/%s'%vmi_id)
+        return [x['uuid'] for x in obj['virtual-machine-interface'
+                                      ].get('service_health_check_refs', [])]
+
+    def get_loadbalancer(self, lb_id, refresh=True):
+        '''
+        method: get_loadbalancer find the loadbalancer
+        returns None if not found, a dict w/ attrib. eg:
+
+        '''
+        p = self.try_cache_by_id('loadbalancer', lb_id, refresh)
+        if not p:
+            # cache miss
+            pp = self.dict_get('loadbalancer/%s' % lb_id)
+            if pp:
+                p = CsLoadbalancer(pp)
+                self.update_cache('loadbalancer', p.fq_name().split(':'), p)
+        return p
+
+    def get_cs_vmi(self, vmi_id):
+        '''
+        method: get_loadbalancer find the loadbalancer
+        returns None if not found, a dict w/ attrib. eg:
+
+        '''
+        obj = self.dict_get('virtual-machine-interface/%s' %vmi_id)
+        if obj:
+            return CsVMIResult(obj)
+        return None
+
+    def get_api_access_list(self, acl_id):
+        '''
+            method: get_api_access_list get the api access control list
+            returns None if not found, a dict w/ attrib. eg:
+
+        '''
+        obj = self.dict_get('api-access-list/%s'%acl_id)
+        if obj:
+            return CsApiAccessList(obj)
+        return None
+
+    def get_aaa_mode(self):
+        ''' get aaa-mode '''
+        dct = self.dict_get('aaa-mode')
+        return dct.get('aaa-mode') if dct else None
+
+    def set_aaa_mode(self, aaa_mode):
+        ''' set rbac mode '''
+        dct = {'aaa-mode': aaa_mode}
+        self.put(path='aaa-mode', payload=dct)
+
+    def get_cs_alarm(self,alarm_id):
+        obj = self.dict_get('alarm/%s' %alarm_id)
+        if obj:
+            return CsAlarmResult(obj)
+        return None
 
 if __name__ == '__main__':
     va = VNCApiInspect('10.84.7.2')

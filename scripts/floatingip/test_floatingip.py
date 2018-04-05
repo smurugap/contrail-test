@@ -24,6 +24,7 @@ from floating_ip import *
 from policy_test import *
 from multiple_vn_vm_test import *
 from contrail_fixtures import *
+from common import isolated_creds
 from tcutils.wrappers import preposttest_wrapper
 sys.path.append(os.path.realpath('tcutils/pkgs/Traffic'))
 from tcutils.commands import *
@@ -33,6 +34,7 @@ from fabric.context_managers import settings
 from fabric.api import run
 import base
 import test
+from tcutils.util import skip_because
 
 
 class FloatingipTestSanity(base.FloatingIpBaseTest):
@@ -131,8 +133,6 @@ class FloatingipTestSanity(base.FloatingIpBaseTest):
         assert fip_fixture.verify_fip(fip_id1, vn2_vm1_fixture, fvn_fixture)
         if not vn1_vm1_fixture.ping_with_certainty(fip_fixture.fip[fip_id1]):
             result = result and False
-        # fip_fixture.disassoc_and_delete_fip(fip_id)
-        # fip_fixture.disassoc_and_delete_fip(fip_id1)
         if not result:
             self.logger.error('Test to ping between VMs %s and %s' %
                               (vn1_vm1_name, vn2_vm1_name))
@@ -430,6 +430,7 @@ class FloatingipTestSanity(base.FloatingIpBaseTest):
     # end test_exhust_floating_ip_and_further_block_add
 
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter')
     def test_extend_fip_pool_runtime(self):
         '''Test addition of subnet in VN should extend FIP pool and communication from borrower VM to multiple subnet of allocating VNs
         '''
@@ -1627,6 +1628,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
     # test_fip_with_policy
 
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter')
     def test_fip_pool_shared_across_project(self):
         ''' Verify FIP Pool is shared accorss diffrent projects.
         '''
@@ -1645,14 +1647,9 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         vm4_name = get_random_name('vm4')
         vm5_name = get_random_name('vm5')
 
-        self.demo_proj_inputs1 = self.useFixture(
-            ContrailTestInit(
-                self.ini_file,
-                stack_user='admin',
-                stack_password='contrail123',
-                project_fq_name=[
-                    'default-domain',
-                    'demo'], logger=self.logger))
+        self.demo_proj_inputs1 = ContrailTestInit(
+            self.input_file, stack_tenant='demo',logger=self.logger
+        )
         self.demo_proj_connections1 = ContrailConnections(
             self.demo_proj_inputs1, self.logger)
         self.connections = ContrailConnections(self.inputs, self.logger)
@@ -1728,7 +1725,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         # Adding further projects to floating IP.
         self.logger.info('Adding project demo to FIP pool %s' %
                          (fip_pool_name))
-        project_obj = fip_fixture.assoc_project(fip_fixture, 'demo')
+        project_obj = fip_fixture.assoc_project('demo')
 
         # Asscociating FIP to VMs under demo project and exaust 4 fips available from the /29 subnet
         self.logger.info(
@@ -1788,7 +1785,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         # Removing further projects from floating IP pool. For cleanup
         self.logger.info('Removing project demo to FIP pool %s' %
                          (fip_pool_name))
-        project_obj = fip_fixture.deassoc_project(fip_fixture, 'demo')
+        project_obj = fip_fixture.deassoc_project('demo')
 
         if not result:
             self.logger.error(
@@ -1798,6 +1795,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
     # end test_fip_pool_shared_across_project
 
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter')
     def test_communication_across__diff_proj(self):
         ''' Test communication across diffrent projects using Floating IP.
         '''
@@ -1821,65 +1819,38 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         self.get_two_different_compute_hosts()
         self.connections = ContrailConnections(self.inputs, self.logger)
         # Projects
-        user1_fixture = self.useFixture(
-            UserFixture(
-                connections=self.connections,
-                username=user_list[0][0],
-                password=user_list[0][1]))
-
+        user1_fixture= self.useFixture(UserFixture(connections=self.connections,
+            username=user_list[0][0], password=user_list[0][1]))
         project_fixture1 = self.useFixture(
             ProjectFixture(
-                project_name=projects[
-                    0], vnc_lib_h=self.vnc_lib, username=user_list[0][0],
+                project_name=projects[0], username=user_list[0][0],
                 password=user_list[0][1], connections=self.connections))
-        user1_fixture.add_user_to_tenant(
-            projects[0],
-            user_list[0][0],
-            user_list[0][2])
-        project_inputs1 = self.useFixture(
-            ContrailTestInit(
-                self.ini_file,
-                stack_user=project_fixture1.username,
-                stack_password=project_fixture1.password,
-                project_fq_name=[
-                    'default-domain',
-                    projects[0]], logger=self.logger))
-        project_connections1 = ContrailConnections(
-            project_inputs1,
-            self.logger)
+        project_fixture1.set_user_creds(project_fixture1.username,project_fixture1.password)
+        user1_fixture.add_user_to_tenant(projects[0], user_list[0][0] , user_list[0][2])
+        project_inputs1 = ContrailTestInit(
+            self.input_file, stack_user=project_fixture1.project_username,
+            stack_password=project_fixture1.project_user_password,
+            stack_tenant=projects[0], logger = self.logger)
+        project_connections1 = ContrailConnections(project_inputs1,self.logger) 
         self.connections = ContrailConnections(self.inputs, self.logger)
         self.logger.info(
             'Default SG to be edited for allow all on project: %s' %
             projects[0])
         project_fixture1.set_sec_group_for_allow_all(projects[0], 'default')
 
-        user2_fixture = self.useFixture(
-            UserFixture(
-                connections=self.connections,
-                username=user_list[1][0],
-                password=user_list[1][1]))
-
+        user2_fixture= self.useFixture(UserFixture(connections=self.connections,
+            username=user_list[1][0], password=user_list[1][1]))
         project_fixture2 = self.useFixture(
             ProjectFixture(
-                project_name=projects[
-                    1], vnc_lib_h=self.vnc_lib, username=user_list[1][0],
+                project_name=projects[1], username=user_list[1][0],
                 password=user_list[1][1], connections=self.connections))
-        user2_fixture.add_user_to_tenant(
-            projects[1],
-            user_list[1][0],
-            user_list[1][2])
-        project_inputs2 = self.useFixture(
-            ContrailTestInit(
-                self.ini_file,
-                stack_user=project_fixture2.username,
-                stack_password=project_fixture2.password,
-                project_fq_name=[
-                    'default-domain',
-                    projects[1]], logger=self.logger))
-        project_connections2 = ContrailConnections(
-            project_inputs2,
-            self.logger)
-        self.connections = ContrailConnections(self.inputs, self.logger)
+        project_fixture2.set_user_creds(project_fixture2.username,project_fixture2.password)
+        user2_fixture.add_user_to_tenant(projects[1], user_list[1][0] , user_list[1][2])
+        project_inputs2 = ContrailTestInit(
+            self.input_file, stack_user=project_fixture2.project_username,
+            stack_password=project_fixture2.project_user_password,
+            stack_tenant=projects[1], logger = self.logger)
+        project_connections2 = ContrailConnections(project_inputs2, self.logger)
         self.logger.info(
             'Default SG to be edited for allow all on project: %s' %
             projects[1])
@@ -1936,7 +1907,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         # Adding further projects to floating IP.
         self.logger.info('Adding project demo to FIP pool %s' %
                          (fip_pool_name))
-        project_obj = fip_fixture.assoc_project(fip_fixture, projects[0])
+        project_obj = fip_fixture.assoc_project(projects[0])
 
         self.logger.info(
             'Allocating FIP to VM %s in project %s from VN %s in project %s ' %
@@ -1952,7 +1923,7 @@ class FloatingipTestSanity2(base.FloatingIpBaseTest):
         # Removing further projects from floating IP pool. For cleanup
         self.logger.info('Removing project %s from FIP pool %s' %
                          (projects[0], fip_pool_name))
-        project_obj = fip_fixture.deassoc_project(fip_fixture, projects[0])
+        project_obj = fip_fixture.deassoc_project(projects[0])
 
         if not result:
             self.logger.error(
@@ -2204,7 +2175,7 @@ class FloatingipTestSanity3(base.FloatingIpBaseTest):
             msg = proto + \
                 " Traffic Stats is not matching with opServer flow series data"
             self.logger.info(
-                "***Actual Traffic sent by agent %s \n\n stats shown by Analytics flow series%s" %
+                "%%%%%%Actual Traffic sent by agent %s \n\n stats shown by Analytics flow series%s" %
                 (traffic_stats[proto], flow_series_data[proto]))
         print flow_series_data[proto]
         for i in xrange(len(flow_series_data[proto]) - 1):
@@ -2216,7 +2187,7 @@ class FloatingipTestSanity3(base.FloatingIpBaseTest):
 
         self.logger.info("-" * 80)
         self.logger.info(
-            "***Let flows age out and verify analytics still shows the data in the history***")
+            "%%%Let flows age out and verify analytics still shows the data in the history%%%")
         self.logger.info("-" * 80)
         time.sleep(180)
         for proto in traffic_proto_l:
@@ -2276,173 +2247,6 @@ class FloatingipTestSanity3(base.FloatingIpBaseTest):
             assert result
         return result
     # end test_fip_with_traffic
-
-    @preposttest_wrapper
-    def test_ping_to_fip_using_diag(self):
-        '''Test ping to floating IP using diag introspect.
-        '''
-        result = True
-        fip_pool_name = get_random_name('some-pool1')
-
-        (vn1_name, vn1_subnets) = (
-            get_random_name("vn1"), [get_random_cidr()])
-        (fvn1_name, fvn1_subnets) = (
-            get_random_name("fip_vn1"), [get_random_cidr()])
-        (vn1_vm1_name) = (get_random_name('vn1_vm1'))
-        (fvn1_vm1_name) = (get_random_name('fvn1_vm1'))
-
-        # Get all computr hosts
-        self.get_two_different_compute_hosts()
-        fvn1_fixture = self.useFixture(
-            VNFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                inputs=self.inputs,
-                vn_name=fvn1_name,
-                subnets=fvn1_subnets))
-        vn1_fixture = self.useFixture(
-            VNFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                inputs=self.inputs,
-                vn_name=vn1_name,
-                subnets=vn1_subnets))
-        fvn1_vm1_fixture = self.useFixture(
-            VMFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_obj=fvn1_fixture.obj,
-                vm_name=fvn1_vm1_name,
-                node_name=self.compute_2))
-
-        vn1_vm1_fixture = self.useFixture(
-            VMFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_obj=vn1_fixture.obj,
-                vm_name=vn1_vm1_name,
-                node_name=self.compute_1))
-
-        assert fvn1_fixture.verify_on_setup()
-        assert vn1_fixture.verify_on_setup()
-        assert vn1_vm1_fixture.verify_on_setup()
-        assert fvn1_vm1_fixture.verify_on_setup()
-
-        fip_fixture1 = self.useFixture(
-            FloatingIPFixture(
-                project_name=self.inputs.project_name,
-                inputs=self.inputs,
-                connections=self.connections,
-                pool_name=fip_pool_name,
-                vn_id=fvn1_fixture.vn_id))
-        assert fip_fixture1.verify_on_setup()
-
-        fip_id1 = fip_fixture1.create_and_assoc_fip(
-            fvn1_fixture.vn_id, vn1_vm1_fixture.vm_id)
-        self.addCleanup(fip_fixture1.disassoc_and_delete_fip, fip_id1)
-        assert fip_fixture1.verify_fip(fip_id1, vn1_vm1_fixture, fvn1_fixture)
-
-        if not fvn1_vm1_fixture.ping_with_certainty(fip_fixture1.fip[fip_id1]):
-            result = result and False
-        inspect_h1 = self.agent_inspect[fvn1_vm1_fixture.vm_node_ip]
-        self.logger.info("Pinging using diag introspect from IP %s to IP %s" %
-                         (fvn1_vm1_fixture.vm_ip, fip_fixture1.fip[fip_id1]))
-        result = inspect_h1.get_vna_verify_diag_ping(
-            src_ip=fvn1_vm1_fixture.vm_ip,
-            dst_ip=fip_fixture1.fip[fip_id1],
-            vrf=fvn1_vm1_fixture.agent_vrf_objs['vrf_list'][0]['name'],
-            proto='17')
-        if not result:
-            self.logger.error(
-                'Test to ping uding diag between VMs %s and %s' %
-                (fvn1_vm1_fixture.vm_ip, fip_fixture1.fip[fip_id1]))
-            assert result
-        return result
-    # end test_ping_to_fip_using_diag
-
-    @test.attr(type=['sanity', 'ci_sanity', 'quick_sanity', 'vcenter'])
-    @preposttest_wrapper
-    def test_floating_ip(self):
-        '''Test to validate floating-ip Assignment to a VM. It creates a VM, assigns a FIP to it and pings to a IP in the FIP VN.
-        '''
-        result = True
-        fip_pool_name = get_random_name('some-pool')
-        vn1_vm1_name = get_random_name('vn1_vm1_name')
-        fvn_vm1_name = get_random_name('fvn_vm1_name')
-
-        (vn1_name, vn1_subnets) = (
-            get_random_name("vn1"), [get_random_cidr()])
-        (fvn_name, fvn_subnets) = (
-            get_random_name("fvn"), [get_random_cidr()])
-
-        # Get all computes
-        self.get_two_different_compute_hosts()
-
-        fvn_fixture = self.useFixture(
-            VNFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                inputs=self.inputs,
-                vn_name=fvn_name,
-                subnets=fvn_subnets))
-
-        assert fvn_fixture.verify_on_setup()
-
-        vn1_fixture = self.useFixture(
-            VNFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                inputs=self.inputs,
-                vn_name=vn1_name,
-                subnets=vn1_subnets))
-
-        assert vn1_fixture.verify_on_setup()
-
-        vn1_vm1_fixture = self.useFixture(
-            VMFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_obj=vn1_fixture.obj,
-                vm_name=vn1_vm1_name,
-                node_name=self.compute_1
-            ))
-
-        fvn_vm1_fixture = self.useFixture(
-            VMFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_obj=fvn_fixture.obj,
-                vm_name=fvn_vm1_name,
-                node_name=self.compute_2
-            ))
-
-        assert vn1_vm1_fixture.verify_on_setup()
-        assert fvn_vm1_fixture.verify_on_setup()
-
-        fip_fixture = self.useFixture(
-            FloatingIPFixture(
-                project_name=self.inputs.project_name,
-                inputs=self.inputs,
-                connections=self.connections,
-                pool_name=fip_pool_name,
-                vn_id=fvn_fixture.vn_id))
-        assert fip_fixture.verify_on_setup()
-        fip_id = fip_fixture.create_and_assoc_fip(
-            fvn_fixture.vn_id, vn1_vm1_fixture.vm_id)
-        assert fip_fixture.verify_fip(fip_id, vn1_vm1_fixture, fvn_fixture)
-        vn1_vm1_fixture.wait_till_vm_up()
-        fvn_vm1_fixture.wait_till_vm_up()
-        if not vn1_vm1_fixture.ping_with_certainty(fvn_vm1_fixture.vm_ip):
-            result = result and False
-        fip_fixture.disassoc_and_delete_fip(fip_id)
-
-        if not result:
-            self.logger.error('Test to ping between VMs %s and %s failed' %
-                              (vn1_vm1_name, fvn_vm1_name))
-            assert result
-
-        return True
-    # end test_floating_ip
 
 
 class FloatingipTestSanity4(base.FloatingIpBaseTest):
@@ -2793,21 +2597,19 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
                 username, self.inputs.cfgm_ips[0]),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
 
-            status = run('cd /opt/contrail/utils;' + add_static_route_cmd)
+            status = run('cd /usr/share/contrail-utils/;' + add_static_route_cmd)
             self.logger.debug("%s" % status)
-            m = re.search(r'Creating Route table', status)
-            assert m, 'Failed in Creating Route table'
 
         compute_ip = vm2_fixture.vm_node_ip
         compute_user = self.inputs.host_data[compute_ip]['username']
         compute_password = self.inputs.host_data[compute_ip]['password']
         session = ssh(compute_ip, compute_user, compute_password)
-        vm2_tapintf = vm2_fixture.tap_intf[vn1_fixture.vn_fq_name]['name']
-        cmd = 'tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (vm2_tapintf,
+        vm2_tapintf = self.orch.get_vm_tap_interface(vm2_fixture.tap_intf[vn1_fixture.vn_fq_name])
+        cmd = 'sudo tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (vm2_tapintf,
                                                                    vm2_tapintf)
         execute_cmd(session, cmd, self.logger)
         assert not(vm1_fixture.ping_to_ip(vm3_fixture.vm_ip, count='20'))
-        self.logger.info('***** Will check the result of tcpdump *****')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%')
         output_cmd = 'cat /tmp/%s_out.log' % vm2_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
         print output
@@ -2839,7 +2641,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             result = result and False
             self.logger.error(
                 'Longest prefix matched route is not taken floating ip ping is failing')
-        self.logger.info('***** Will check the result of tcpdump *****')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%')
         output_cmd = 'cat /tmp/%s_out.log' % vm2_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
         print output
@@ -2863,7 +2665,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             host_string='%s@%s' % (
                 username, self.inputs.cfgm_ips[0]),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
-            status = run('cd /opt/contrail/utils;' + del_static_route_cmd)
+            status = run('cd /usr/share/contrail-utils/;' + del_static_route_cmd)
             self.logger.debug("%s" % status)
         assert result
         return True
@@ -2920,8 +2722,8 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
                 project_name=self.inputs.project_name))
         assert vm2_fixture.verify_on_setup()
 
-        self.nova_h.wait_till_vm_is_up(vm1_fixture.vm_obj)
-        self.nova_h.wait_till_vm_is_up(vm2_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm1_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm2_fixture.vm_obj)
 
         rules = [
             {
@@ -3065,9 +2867,9 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
                 project_name=self.inputs.project_name))
         assert vm3_fixture.verify_on_setup()
 
-        self.nova_h.wait_till_vm_is_up(vm1_fixture.vm_obj)
-        self.nova_h.wait_till_vm_is_up(vm2_fixture.vm_obj)
-        self.nova_h.wait_till_vm_is_up(vm3_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm1_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm2_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm3_fixture.vm_obj)
 
         cmd_to_pass1 = ['ifconfig eth1 up']
         vm2_fixture.run_cmd_on_vm(cmds=cmd_to_pass1, as_sudo=True)
@@ -3095,10 +2897,8 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             host_string='%s@%s' % (
                 username, self.inputs.cfgm_ips[0]),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
-            status = run('cd /opt/contrail/utils;' + add_static_route_cmd)
+            status = run('cd /usr/share/contrail-utils/;' + add_static_route_cmd)
             self.logger.debug("%s" % status)
-            m = re.search(r'Creating Route table', status)
-            assert m, 'Failed in Creating Route table'
 
         fip_fixture = self.useFixture(
             FloatingIPFixture(
@@ -3121,12 +2921,12 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
         compute_user = self.inputs.host_data[compute_ip]['username']
         compute_password = self.inputs.host_data[compute_ip]['password']
         session = ssh(compute_ip, compute_user, compute_password)
-        vm3_tapintf = vm3_fixture.tap_intf[vn3_fixture.vn_fq_name]['name']
-        cmd = 'tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
+        vm3_tapintf = self.orch.get_vm_tap_interface(vm3_fixture.tap_intf[vn3_fixture.vn_fq_name])
+        cmd = 'sudo tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
             vm3_tapintf, vm3_tapintf)
         execute_cmd(session, cmd, self.logger)
         assert not(vm1_fixture.ping_to_ip(vm2_eth1_ip, count='20'))
-        self.logger.info('***** Will check the result of tcpdump *****\n')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%\n')
         output_cmd = 'cat /tmp/%s_out.log' % vm3_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
         print output
@@ -3154,7 +2954,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             host_string='%s@%s' % (
                 username, self.inputs.cfgm_ip),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
-            status = run('cd /opt/contrail/utils;' + add_static_route_cmd)
+            status = run('cd /usr/share/contrail-utils/;' + add_static_route_cmd)
             self.logger.debug("%s" % status)
 
         execute_cmd(session, cmd, self.logger)
@@ -3162,7 +2962,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             result = result and False
             self.logger.error(
                 'Longest prefix matched route is not taken ping using native static route is failing \n')
-        self.logger.info('***** Will check the result of tcpdump *****')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%')
         output_cmd = 'cat /tmp/%s_out.log' % vm3_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
         print output
@@ -3194,9 +2994,9 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             host_string='%s@%s' % (
                 username, self.inputs.cfgm_ip),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
-            status = run('cd /opt/contrail/utils;' + del_static_route_cmd1)
+            status = run('cd /usr/share/contrail-utils/;' + del_static_route_cmd1)
             self.logger.debug("%s" % status)
-            status = run('cd /opt/contrail/utils;' + del_static_route_cmd2)
+            status = run('cd /usr/share/contrail-utils/;' + del_static_route_cmd2)
             self.logger.debug("%s" % status)
 
         assert result, 'Failed to take route with longest prefix'
@@ -3278,8 +3078,8 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
                 project_name=self.inputs.project_name))
         assert vm2_fixture.verify_on_setup()
 
-        self.nova_h.wait_till_vm_is_up(vm1_fixture.vm_obj)
-        self.nova_h.wait_till_vm_is_up(vm2_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm1_fixture.vm_obj)
+        self.orch.wait_till_vm_is_active(vm2_fixture.vm_obj)
 
         cmd_to_pass1 = ['ifconfig eth1 up']
         vm1_fixture.run_cmd_on_vm(cmds=cmd_to_pass1, as_sudo=True)
@@ -3314,15 +3114,11 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             host_string='%s@%s' % (
                 username, self.inputs.cfgm_ip),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
-            status1 = run('cd /opt/contrail/utils;' + add_static_route_cmd1)
+            status1 = run('cd /usr/share/contrail-utils/;' + add_static_route_cmd1)
             self.logger.debug("%s" % status1)
-            m = re.search(r'Creating Route table', status1)
-            assert m, 'Failed in Creating Route table'
 
-            status2 = run('cd /opt/contrail/utils;' + add_static_route_cmd2)
+            status2 = run('cd /usr/share/contrail-utils/;' + add_static_route_cmd2)
             self.logger.debug("%s" % status2)
-            m = re.search(r'Creating Route table', status2)
-            assert m, 'Failed in Creating Route table'
 
         fip_pool_name1 = get_random_name('test-floating-pool1')
         fip_fixture1 = self.useFixture(
@@ -3362,11 +3158,11 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
         compute_user = self.inputs.host_data[compute_ip]['username']
         compute_password = self.inputs.host_data[compute_ip]['password']
         session = ssh(compute_ip, compute_user, compute_password)
-        vm1_tapintf_eth1 = vm1_fixture.tap_intf[vn2_fixture.vn_fq_name]['name']
-        vm1_tapintf_eth2 = vm1_fixture.tap_intf[vn3_fixture.vn_fq_name]['name']
-        cmd1 = 'tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
+        vm1_tapintf_eth1 = self.orch.get_vm_tap_interface(vm1_fixture.tap_intf[vn2_fixture.vn_fq_name])
+        vm1_tapintf_eth2 = self.orch.get_vm_tap_interface(vm1_fixture.tap_intf[vn3_fixture.vn_fq_name])
+        cmd1 = 'sudo tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
             vm1_tapintf_eth1, vm1_tapintf_eth1)
-        cmd2 = 'tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
+        cmd2 = 'sudo tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
             vm1_tapintf_eth2, vm1_tapintf_eth2)
         execute_cmd(session, cmd1, self.logger)
         execute_cmd(session, cmd2, self.logger)
@@ -3377,7 +3173,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             result = result and False
             self.logger.error("Ping from vm222 to vm111 failed not expected")
 
-        self.logger.info('***** Will check the result of tcpdump *****\n')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%\n')
         output_cmd1 = 'cat /tmp/%s_out.log' % vm1_tapintf_eth1
         output_cmd2 = 'cat /tmp/%s_out.log' % vm1_tapintf_eth2
         output1, err = execute_cmd_out(session, output_cmd1, self.logger)
@@ -3417,9 +3213,9 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             host_string='%s@%s' % (
                 username, self.inputs.cfgm_ip),
                 password=password, warn_only=True, abort_on_prompts=False, debug=True):
-            status1 = run('cd /opt/contrail/utils;' + del_static_route_cmd1)
+            status1 = run('cd /usr/share/contrail-utils/;' + del_static_route_cmd1)
             self.logger.debug("%s" % status1)
-            status2 = run('cd /opt/contrail/utils;' + del_static_route_cmd2)
+            status2 = run('cd /usr/share/contrail-utils/;' + del_static_route_cmd2)
             self.logger.debug("%s" % status2)
 
         assert result, 'Longest prefix match rule not followed'
@@ -3502,8 +3298,8 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
         compute_user = self.inputs.host_data[compute_ip]['username']
         compute_password = self.inputs.host_data[compute_ip]['password']
         session = ssh(compute_ip, compute_user, compute_password)
-        vm1_tapintf = vm1_fixture.tap_intf[vn1_fixture.vn_fq_name]['name']
-        cmd = 'tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
+        vm1_tapintf = self.orch.get_vm_tap_interface(vm1_fixture.tap_intf[vn1_fixture.vn_fq_name])
+        cmd = 'sudo tcpdump -ni %s icmp -vvv -c 2 > /tmp/%s_out.log' % (
             vm1_tapintf, vm1_tapintf)
         execute_cmd(session, cmd, self.logger)
         if not (
@@ -3513,7 +3309,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
             result = result and False
             self.logger.error("Ping from vm222 to vm111 failed not expected")
 
-        self.logger.info('***** Will check the result of tcpdump *****\n')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%\n')
         output_cmd = 'cat /tmp/%s_out.log' % vm1_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
         print output
@@ -3547,7 +3343,7 @@ class FloatingipTestSanity5(base.FloatingIpBaseTest):
                 count='20')):
             result = result and False
             self.logger.error("Ping from vm222 to vm111 failed not expected")
-        self.logger.info('***** Will check the result of tcpdump *****')
+        self.logger.info('%%%%% Will check the result of tcpdump %%%%%')
         output_cmd = 'cat /tmp/%s_out.log' % vm1_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
         print output

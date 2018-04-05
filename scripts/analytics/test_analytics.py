@@ -31,13 +31,28 @@ class AnalyticsTestSanity(base.AnalyticsBaseTest):
         pass
     #end runTest
 
-    @test.attr(type=['sanity'])
+    @test.attr(type=['cb_sanity', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_contrail_status(self):
         ''' Test to verify that all services are running and active
 
         '''
-        assert self.inputs.verify_state()
+        if not self.inputs.verify_state():
+            self.logger.error("contrail-status failed")
+            return False
+        else:
+            self.logger.info("contrail-status passed")
+        return True
+
+    @test.attr(type=['vcenter'])
+    @preposttest_wrapper
+    def test_contrail_alarms(self):
+        ''' Test to check if alarms are present
+
+        '''
+        alarms = self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].get_ops_alarms()
+        if alarms:
+            assert False, "alarms generated %s" % (alarms)
         return True
 
     @preposttest_wrapper
@@ -75,90 +90,14 @@ class AnalyticsTestSanity(base.AnalyticsBaseTest):
         '''Test to validate config node uve.
         '''
         result=True
-        process_list = ['contrail-discovery', 'contrail-config-nodemgr'
-                        ,'contrail-svc-monitor', 'ifmap', 'contrail-api', 'contrail-schema']
+        process_list = ['contrail-config-nodemgr', 'contrail-svc-monitor', 'ifmap', 'contrail-api',
+                        'contrail-schema']
         for process in process_list:
             result = result and self.analytics_obj.verify_cfgm_uve_module_state(self.inputs.collector_names[0],
 				self.inputs.cfgm_names[0],process)
         assert result
     	return True
     
-    @test.attr(type=['sanity', 'ci_sanity'])
-    @preposttest_wrapper
-    def test_verify_object_logs(self):
-        '''
-          Description: Test to validate object logs
-              1.Create vn/vm and verify object log tables updated with those vn/vm - fails otherwise
-          Maintainer: sandipd@juniper.net
-        '''
-        vn_name='vn22'
-        vn_subnets=['22.1.1.0/24']
-        vm1_name='vm_test'
-        start_time=self.analytics_obj.getstarttime(self.inputs.cfgm_ip)
-        vn_fixture= self.useFixture(VNFixture(project_name= self.inputs.project_name, connections= self.connections,
-                     vn_name=vn_name, inputs= self.inputs, subnets= vn_subnets))
-        vn_obj= vn_fixture.obj
-        vm1_fixture= self.useFixture(VMFixture(connections= self.connections,
-                vn_obj=vn_obj, vm_name= vm1_name, project_name= self.inputs.project_name))
-        #getting vm uuid
-        assert vm1_fixture.wait_till_vm_is_up()
-        vm_uuid=vm1_fixture.vm_id
-        self.logger.info("Waiting for logs to be updated in the database...")
-        time.sleep(10)
-        query='('+'ObjectId=%s)'%vn_fixture.vn_fq_name
-        result=True
-        self.logger.info("Verifying ObjectVNTable through opserver %s.."%(self.inputs.collector_ips[0]))
-        res2=self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].post_query('ObjectVNTable',
-                                                                                start_time=start_time,end_time='now'
-                                                                                ,select_fields=['ObjectId', 'Source',
-                                                                                'ObjectLog', 'SystemLog','Messagetype',
-                                                                                'ModuleId','MessageTS'],
-                                                                                 where_clause=query)
-        self.logger.info("query output : %s"%(res2))
-        if not res2:
-            st=self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].send_trace_to_database\
-                                 (node= self.inputs.collector_names[0], module= 'QueryEngine',trace_buffer_name= 'QeTraceBuf')
-            self.logger.info("status: %s"%(st))
-        assert res2
-
-        self.logger.info("Getting object logs for vm")
-        query='('+'ObjectId='+ vm_uuid +')'
-        self.logger.info("Verifying ObjectVMTable through opserver %s.."%(self.inputs.collector_ips[0]))
-        res1=self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].post_query('ObjectVMTable',
-                                                                                start_time=start_time,end_time='now'
-                                                                                ,select_fields=['ObjectId', 'Source',
-                                                                                'ObjectLog', 'SystemLog','Messagetype',
-                                                                                'ModuleId','MessageTS'],
-                                                                                 where_clause=query)
-        self.logger.info("query output : %s"%(res1))
-        if not res1:
-            st=self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].send_trace_to_database\
-                         (node= self.inputs.collector_names[0], module= 'QueryEngine',trace_buffer_name= 'QeTraceBuf')
-            self.logger.info("status: %s"%(st))
-        assert res1
-
-        self.logger.info("Getting object logs for ObjectRoutingInstance table")
-#        object_id=self.inputs.project_fq_name[0]+':'+self.inputs.project_fq_name[1]+vn_name+':'+vn_name
-        object_id='%s:%s:%s:%s'%(self.inputs.project_fq_name[0],self.inputs.project_fq_name[1],vn_name,vn_name)
-#        query='('+'ObjectId=default-domain:admin:'+vn_name+')'
-        query='(ObjectId=%s)'%(object_id)
-
-        self.logger.info("Verifying ObjectRoutingInstance through opserver %s.."%(self.inputs.collector_ips[0]))
-        res1=self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].post_query('ObjectRoutingInstance',
-                                                                                start_time=start_time,end_time='now'
-                                                                                ,select_fields=['ObjectId', 'Source',
-                                                                                'ObjectLog', 'SystemLog','Messagetype',
-                                                                                'ModuleId','MessageTS'],
-                                                                                 where_clause=query)
-        self.logger.info("query output : %s"%(res1))
-        if not res1:
-            self.logger.warn("ObjectRoutingInstance  query did not return any output")
-            st=self.analytics_obj.ops_inspect[self.inputs.collector_ips[0]].send_trace_to_database\
-                         (node= self.inputs.collector_names[0], module= 'QueryEngine',trace_buffer_name= 'QeTraceBuf')
-            self.logger.info("status: %s"%(st))
-        assert res1
-        return True
- 
     @preposttest_wrapper
     def test_verify_hrefs(self):
         ''' Test all hrefs for collector/agents/bgp-routers etc
@@ -274,7 +213,7 @@ class AnalyticsTestSanity2(base.AnalyticsBaseTest):
             vm_fixture= self.useFixture(create_multiple_vn_and_multiple_vm_fixture (connections= self.connections,
                      vn_name=vn_name, vm_name=vm1_name, inputs= self.inputs,project_name= self.inputs.project_name,
                       subnets= vn_subnets,vn_count=vn_count_for_test,vm_count=1,subnet_count=1,
-                      image_name='cirros-0.3.0-x86_64-uec',ram='512'))
+                      image_name='cirros',ram='512'))
 
             compute_ip=[]
             time.sleep(100)
@@ -313,7 +252,7 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         pass
     #end runTest
 
-    @test.attr(type=['sanity'])
+    @test.attr(type=['sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_verify_generator_collector_connections(self):
         '''
@@ -326,7 +265,6 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
 
          Maintainer: sandipd@juniper.net
         '''
-        self.logger.info("START ...")
         # check collector-generator connections through uves.
         assert self.analytics_obj.verify_collector_uve()
         # Verify vrouter uve active xmpp connections
@@ -335,10 +273,10 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         assert self.analytics_obj.verify_vrouter_xmpp_connections()
         # count of xmpp peer and bgp peer verification in bgp-router uve
         assert self.analytics_obj.verify_bgp_router_uve_xmpp_and_bgp_count()
-        self.logger.info("END...")
         return True
     # end test_remove_policy_with_ref
 
+    @test.attr(type=['cb_sanity', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_verify_process_status_agent(self):
         ''' Test to validate process_status
@@ -346,6 +284,7 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         '''
         self.analytics_obj.verify_process_and_connection_infos_agent()
     
+    @test.attr(type=['cb_sanity', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_verify_process_status_config(self):
         ''' Test to validate process_status-Config
@@ -353,6 +292,7 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         '''
         self.analytics_obj.verify_process_and_connection_infos_config()
     
+    @test.attr(type=['cb_sanity', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_verify_process_status_control_node(self):
         ''' Test to validate process_status-Control-Node
@@ -360,6 +300,7 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         '''
         self.analytics_obj.verify_process_and_connection_infos_control_node()
     
+    @test.attr(type=['cb_sanity', 'sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_verify_process_status_analytics_node(self):
         ''' Test to validate process_status-Analytics-Node
@@ -367,6 +308,7 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         '''
         self.analytics_obj.verify_process_and_connection_infos_analytics_node()
     
+    @test.attr(type=['sanity', 'vcenter'])
     @preposttest_wrapper
     def test_verify_generator_connections_to_collector_node(self):
         ''' Test to validate generator connections
@@ -379,9 +321,11 @@ class AnalyticsTestSanity3(base.AnalyticsBaseTest):
         ''' Test to db purge
 
         '''
+        start_time = self.analytics_obj.getstarttime(self.inputs.collector_ip)
         purge_id = self.analytics_obj.get_purge_id(20)
-        assert self.analytics_obj.verify_purge_info_in_database_uve(purge_id)
+        assert self.analytics_obj.verify_purge_info_in_database_uve(purge_id,start_time)
     
+    @test.attr(type=['sanity', 'vcenter', 'vcenter_compute'])
     @preposttest_wrapper
     def test_db_nodemgr_status(self):
         ''' Test to verify db nodemgr status

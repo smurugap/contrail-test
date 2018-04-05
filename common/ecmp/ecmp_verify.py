@@ -16,17 +16,20 @@ from tcutils.wrappers import preposttest_wrapper
 
 class ECMPVerify():
 
-    def get_rt_info_tap_intf_list(self, src_vn, src_vm, dst_vm, svm_ids):
-        shared_ip= self.find_rt_in_ctrl_node(src_vn, src_vm, dst_vm, svm_ids)
+    def get_rt_info_tap_intf_list(self, src_vn, src_vm, dst_vm, svm_ids,
+            si_fixture):
+        shared_ip= self.find_rt_in_ctrl_node(src_vn, src_vm, dst_vm, svm_ids,
+                                             si_fixture)
         self.find_rt_in_agent(src_vn, src_vm, dst_vm)
         return self.get_tap_intf_list(src_vn, src_vm, dst_vm, shared_ip)
     #end get_rt_info_tap_intf_list
 
-    def find_rt_in_ctrl_node(self, src_vn, src_vm, dst_vm, svm_ids):
+    def find_rt_in_ctrl_node(self, src_vn, src_vm, dst_vm, svm_ids,
+                             si_fixture):
         right_ip = {}
         left_ip = {}
         count= 0
-        self.logger.info('***Get the Route Entry in the control node***')
+        self.logger.info('%%%Get the Route Entry in the control node%%%')
         active_controller = None
         inspect_h1 = self.agent_inspect[src_vm.vm_node_ip]
         agent_xmpp_status = inspect_h1.get_vna_xmpp_connection_status()
@@ -40,17 +43,29 @@ class ECMPVerify():
         assert count > 0, 'Some Problem with the setup. Pls chk XMPP connection'
         svm_route_entry = {}
         for svm_id in svm_ids:
-            svc_obj = self.nova_h.get_vm_by_id(
-                svm_id, self.inputs.project_name)
-            left_ip[svm_id] = svc_obj.addresses[self.si_fixtures[0]
-                                                .left_vn_name.split(':')[2]][0]['addr']
-            right_ip[svm_id] = svc_obj.addresses[self.si_fixtures[0]
-                                                 .right_vn_name.split(':')[2]][0]['addr']
-            self.logger.info('%s has %s as left_ip and %s as right_ip' %
+            try:
+                svc_obj = self.nova_h.get_vm_by_id(svm_id)
+                left_ip[svm_id] = svc_obj.addresses[si_fixture
+                                                .left_vn_fq_name.split(':')[2]][0]['addr']
+                right_ip[svm_id] = svc_obj.addresses[si_fixture
+                                                 .right_vn_fq_name.split(':')[2]][0]['addr']
+                self.logger.info('%s has %s as left_ip and %s as right_ip' %
+                             (svc_obj.name, left_ip[svm_id], right_ip[svm_id]))
+            except Exception as e:
+                #For vcenter only setup, nova not present
+                #derive ips from orchestrator get_vm_by_id
+                orch=src_vm.orch
+                svc_obj=orch.get_vm_by_id(svm_id) 
+                left_ip[svm_id]=svc_obj.ips[si_fixture.left_vn_fq_name.split(':')[2]] 
+                right_ip[svm_id]=svc_obj.ips[si_fixture.right_vn_fq_name.split(':')[2]]
+                self.logger.info('%s has %s as left_ip and %s as right_ip' %
                              (svc_obj.name, left_ip[svm_id], right_ip[svm_id]))
             shared_ip= left_ip[svm_id]
+        net = '/32'
+        if self.inputs.get_af() == 'v6':
+            net = '/128'
         dst_vm_ip = self.cn_inspect[new_controller].get_cn_route_table_entry(
-                ri_name=src_vn.ri_name, prefix=dst_vm.vm_ip + '/32')
+                ri_name=src_vn.ri_name, prefix=dst_vm.vm_ip + net)
         result = True
         if dst_vm_ip:
             self.logger.info(
@@ -64,11 +79,14 @@ class ECMPVerify():
     #end find_rt_in_ctrl_node
 
     def find_rt_in_agent(self, src_vn, src_vm, dst_vm):
-        self.logger.info('***Get the Route Entry in the agent***')
+        self.logger.info('%%%Get the Route Entry in the agent%%%')
         vn_vrf_id= self.get_vrf_id(src_vn, src_vm)
         inspect_h1 = self.agent_inspect[src_vm.vm_node_ip]
+        net = '32'
+        if self.inputs.get_af() == 'v6':
+            net = '128'
         paths = inspect_h1.get_vna_active_route(
-            vrf_id=vn_vrf_id, ip=dst_vm.vm_ip, prefix='32')['path_list']
+            vrf_id=vn_vrf_id, ip=dst_vm.vm_ip, prefix=net)['path_list']
         self.logger.info('There are %s nexthops to %s on Agent %s' %
                          (len(paths), dst_vm.vm_ip, src_vm.vm_node_ip))
         next_hops = paths[0]['nh']
@@ -79,11 +97,14 @@ class ECMPVerify():
     #end find_rt_in_agent
 
     def get_tap_intf_list(self, src_vn, src_vm, dst_vm, shared_ip):
-        self.logger.info('***Get the Tap Interface List***')
+        self.logger.info('%%%Get the Tap Interface List%%%')
         vn_vrf_id= self.get_vrf_id(src_vn, src_vm)
         inspect_h1 = self.agent_inspect[src_vm.vm_node_ip]
+        net = '32'
+        if self.inputs.get_af() == 'v6':
+            net = '128'
         paths = inspect_h1.get_vna_active_route(
-            vrf_id=vn_vrf_id, ip=shared_ip, prefix='32')['path_list']
+            vrf_id=vn_vrf_id, ip=shared_ip, prefix=net)['path_list']
         next_hops = paths[0]['nh']       
         (domain, project, vn) = src_vn.vn_fq_name.split(':')
         tap_intf_list= []
@@ -92,7 +113,7 @@ class ECMPVerify():
             inspect_h1 = self.agent_inspect[src_vm.vm_node_ip]
             vn_vrf_id= self.get_vrf_id(src_vn, src_vm)
             multi_next_hops = inspect_h1.get_vna_active_route(
-                vrf_id=vn_vrf_id, ip=shared_ip, prefix='32')['path_list'][0]['nh']['mc_list']
+                vrf_id=vn_vrf_id, ip=shared_ip, prefix=net)['path_list'][0]['nh']['mc_list']
 
             for nh in multi_next_hops:
                 if nh['type'] == 'Tunnel':
@@ -102,7 +123,7 @@ class ECMPVerify():
                     inspect_hh = self.agent_inspect[new_destn_agent]
                     vn_vrf_id= self.get_vrf_id(src_vn, src_vm, new_destn_agent)
                     next_hops_in_tnl = inspect_hh.get_vna_active_route(
-                        vrf_id=vn_vrf_id, ip=shared_ip, prefix='32')['path_list'][0]['nh']['mc_list']
+                        vrf_id=vn_vrf_id, ip=shared_ip, prefix=net)['path_list'][0]['nh']['mc_list']
                     for next_hop in next_hops_in_tnl:
                         if next_hop['type'] == 'Interface':
                             tap_intf_from_tnl = next_hop['itf']
@@ -121,7 +142,7 @@ class ECMPVerify():
                 inspect_hh = self.agent_inspect[new_destn_agent]
                 vn_vrf_id= self.get_vrf_id(src_vn, src_vm, new_destn_agent)
                 next_hops_in_tnl = inspect_hh.get_vna_active_route(
-                    vrf_id=vn_vrf_id, ip=shared_ip, prefix='32')['path_list'][0]['nh']
+                    vrf_id=vn_vrf_id, ip=shared_ip, prefix=net)['path_list'][0]['nh']
                 if 'mc_list' in next_hops_in_tnl:
                     next_hops_in_tnl= next_hops_in_tnl['mc_list']
                     for next_hop in next_hops_in_tnl:
@@ -155,11 +176,3 @@ class ECMPVerify():
         vn_vrf_id = agent_vrf_obj['ucindex']
         return vn_vrf_id
     #end get_vrf_id
- 
-    def get_svms_in_si(self, si, proj_name):
-        svm_ids= si.svm_ids                                                                                                                                                                
-        svm_list= []
-        for svm_id in svm_ids:
-            svm_list.append(self.nova_h.get_vm_by_id(svm_id, proj_name))
-        return svm_list
-    #end get_svms_in_si

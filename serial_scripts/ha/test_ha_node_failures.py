@@ -2,6 +2,7 @@ from base import HABaseTest
 from common import isolated_creds
 import time
 from tcutils.wrappers import preposttest_wrapper
+from tcutils.util import skip_because
 import test
 
 class TestHANode(HABaseTest):
@@ -12,29 +13,33 @@ class TestHANode(HABaseTest):
 
     @test.attr(type=['ha'])
     @preposttest_wrapper
+    @skip_because(ha_setup = False)
     def test_ha_reboot(self):
         time.sleep(120)
-        ret = self.ha_reboot_test([self.inputs.cfgm_ips[1],self.inputs.cfgm_ips[2]])
+        ret = self.ha_reboot_test([self.inputs.cfgm_ips[0],self.inputs.cfgm_ips[1]])
         time.sleep(30)
         return ret
 
     @preposttest_wrapper
+    @skip_because(ha_setup = False)
     def test_ha_cold_reboot(self):
         time.sleep(120)
-        ret = self.ha_cold_reboot_test([self.inputs.cfgm_ips[1],self.inputs.cfgm_ips[2]])
+        ret = self.ha_cold_reboot_test([self.inputs.cfgm_ips[0],self.inputs.cfgm_ips[1]])
         time.sleep(30)
         return ret
 
     @preposttest_wrapper
+    @skip_because(ha_setup = False)
     def test_ha_cold_shutdown(self):
         time.sleep(120)
-        ret = self.ha_cold_shutdown_test([self.inputs.cfgm_ips[1],self.inputs.cfgm_ips[2]])
+        ret = self.ha_cold_shutdown_test([self.inputs.cfgm_ips[0],self.inputs.cfgm_ips[1]])
         time.sleep(30)
         return ret
 
     @preposttest_wrapper
+    @skip_because(ha_setup = False)
     def test_ha_isolate(self):
-        ret = self.ha_isolate_test([self.inputs.cfgm_control_ips[1],self.inputs.cfgm_control_ips[2]])
+        ret = self.ha_isolate_test([self.inputs.cfgm_control_ips[0],self.inputs.cfgm_control_ips[1]])
         time.sleep(120)
         return ret
 

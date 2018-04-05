@@ -10,18 +10,43 @@ import ast
 from netaddr import *
 
 import fixtures
-from fabric.api import env, run, local
+from fabric.api import env, run, local, sudo
 from fabric.operations import get, put, reboot
 from fabric.context_managers import settings, hide
 from fabric.exceptions import NetworkError
 from fabric.contrib.files import exists
 
 from tcutils.util import *
+from tcutils.util import custom_dict, read_config_option, get_build_sku, retry
 from tcutils.custom_filehandler import *
+from tcutils.config.vnc_introspect_utils import VNCApiInspect
+from tcutils.collector.opserver_introspect_utils import VerificationOpsSrv
+from tcutils.contrail_status_check import ContrailStatusChecker
+from keystone_tests import KeystoneCommands
+from tempfile import NamedTemporaryFile
+import re
+from common import log_orig as contrail_logging
+from common.contrail_services import CONTRAIL_SERVICES_CONTAINER_MAP
 
 import subprocess
-import ast
 from collections import namedtuple
+import random
+from cfgm_common import utils
+import argparse
+import yaml
+
+ORCH_DEFAULT_DOMAIN = {
+    'openstack' : 'Default',
+    'kubernetes': 'default-domain',
+    'vcenter': 'default-domain',
+}
+DEFAULT_CERT = '/etc/contrail/ssl/certs/server.pem'
+DEFAULT_PRIV_KEY = '/etc/contrail/ssl/private/server-privkey.pem'
+DEFAULT_CA = '/etc/contrail/ssl/certs/ca-cert.pem'
+
+DEFAULT_CI_IMAGE = os.getenv('DEFAULT_CI_IMAGE', 'cirros')
+DEFAULT_CI_SVC_IMAGE = os.getenv('DEFAULT_CI_SVC_IMAGE', 'cirros_in_net')
+CI_IMAGES = [DEFAULT_CI_IMAGE, DEFAULT_CI_SVC_IMAGE]
 
 # monkey patch subprocess.check_output cos its not supported in 2.6
 if "check_output" not in dir(subprocess):  # duck punch it in!
@@ -43,124 +68,247 @@ if "check_output" not in dir(subprocess):  # duck punch it in!
         return output
     subprocess.check_output = f
 
-
-class ContrailTestInit(fixtures.Fixture):
-
-    def __init__(
-            self,
-            ini_file,
-            stack_user=None,
-            stack_password=None,
-            project_fq_name=None,
-            logger=None):
-        self.username = 'root'
-        self.password = 'c0ntrail123'
-        self.api_server_port = '8082'
-        self.bgp_port = '8083'
-        self.ds_port = '5998'
-        self.logger = logger
-        self.build_id = None
-        self.contrail_version = None
-        self.single_node = self.get_os_env('SINGLE_NODE_IP')
+class TestInputs(object):
+    '''
+       Class that would populate testbedinfo from parsing the
+       .ini and .json input files if provided (or)
+       check the keystone server to populate
+       the same with the certain default value assumptions
+    '''
+    __metaclass__ = Singleton
+    def __init__(self, input_file, logger=None):
         self.jenkins_trigger = self.get_os_env('JENKINS_TRIGGERED')
-        self.os_type = {}
-        self.report_details_file = 'report_details.ini'
-        self.config = ConfigParser.ConfigParser()
-        self.config.read(ini_file)
+        self.os_type = custom_dict(self.get_os_version, 'os_type')
+        self.config = None
+        self.input_file = input_file
+        self.logger = logger or contrail_logging.getLogger(__name__)
 
+        self.ha_tmp_list = []
+        self.tor_agent_data = {}
+        self.sriov_data = {}
+        self.dpdk_data = {}
+        self.mysql_token = None
+        self.pcap_on_vm = False
+
+        if input_file.endswith('.ini'):
+            self.parse_ini_file()
+        elif input_file.endswith(('.yml', '.yaml')):
+            self.parse_yml_file()
+        if self.fip_pool:
+            update_reserve_cidr(self.fip_pool)
+        if not self.ui_browser and (self.verify_webui or self.verify_horizon):
+            raise ValueError(
+                "Verification via GUI needs 'browser' details. Please set the same.")
+        self.username = self.host_data[self.cfgm_ip]['username']
+        self.password = self.host_data[self.cfgm_ip]['password']
+
+        insecure = istrue(os.getenv('OS_INSECURE', False))
+        if insecure:
+            self.api_insecure = self.insecure = insecure
+        keycertbundle = None
+        if not self.insecure and self.auth_protocol == 'https' and \
+           self.keystonecertfile and self.keystonekeyfile and \
+           self.keystonecafile:
+            keystone_bundle = '/tmp/' + get_random_string() + '.pem'
+            keycertbundle = utils.getCertKeyCaBundle(keystone_bundle,
+                            [self.keystonecertfile, self.keystonekeyfile,
+                             self.keystonecafile])
+        apicertbundle = None
+        if not self.api_insecure and self.api_protocol == 'https' and \
+           self.apicertfile and self.apikeyfile and self.apicafile:
+            api_bundle = '/tmp/' + get_random_string() + '.pem'
+            apicertbundle = utils.getCertKeyCaBundle(api_bundle,
+                            [self.apicertfile, self.apikeyfile,
+                             self.apicafile])
+        introspect_certbundle = None
+        if not self.introspect_insecure and self.introspect_protocol == 'https' and \
+           self.introspect_cafile:
+            introspect_certbundle = self.introspect_cafile
+
+        self.certbundle = None
+        if keycertbundle or apicertbundle or introspect_certbundle:
+            bundle = '/tmp/' + get_random_string() + '.pem'
+            certs = [cert for cert in [keycertbundle, apicertbundle, introspect_certbundle] if cert]
+            self.certbundle = utils.getCertKeyCaBundle(bundle, certs)
+
+        # List of service correspond to each module
+        self.compute_services = [
+            'contrail-vrouter-agent',
+            'contrail-vrouter-nodemgr']
+        self.control_services = ['contrail-control',
+                                 'contrail-control-nodemgr', 'contrail-dns',
+                                 'contrail-named']
+        self.cfgm_services = [
+            'contrail-api',
+            'contrail-schema',
+            'contrail-svc-monitor',
+            'contrail-config-nodemgr',
+            'contrail-device-manager']
+        self.webui_services = ['contrail-webui', 'contrail-webui-middleware']
+        self.openstack_services = [
+            'openstack-cinder-api', 'openstack-cinder-scheduler',
+            'openstack-cinder-scheduler', 'openstack-glance-api',
+            'openstack-glance-registry', 'openstack-keystone',
+            'openstack-nova-api', 'openstack-nova-scheduler', 'openstack-nova-conductor',
+            'heat-api', 'heat-api-cfn', 'heat-engine', 'rabbitmq-server']
+        self.collector_services = [
+            'contrail-collector', 'contrail-analytics-api', 'contrail-alarm-gen',
+            'contrail-query-engine', 'contrail-analytics-nodemgr',
+            'contrail-snmp-collector', 'contrail-topology']
+        self.database_services = [
+            'contrail-database', 'contrail-database-nodemgr', 'kafka']
+        self.correct_states = ['active', 'backup']
+
+    def parse_ini_file(self):
+        self.config = ConfigParser.ConfigParser()
+        self.config.read(self.input_file)
         self.orchestrator = read_config_option(self.config,
-                              'Basic', 'orchestrator', 'openstack')
+                                               'Basic', 'orchestrator', 'openstack')
+        self.slave_orchestrator = read_config_option(self.config,
+                                                     'Basic', 'slave_orchestrator', None)
+        self.deployer = read_config_option(self.config,
+                                               'Basic', 'deployer', 'openstack')
         self.prov_file = read_config_option(self.config,
                                             'Basic', 'provFile', None)
         self.key = read_config_option(self.config,
                                       'Basic', 'key', 'key1')
-        self.stack_user = stack_user or read_config_option(
+        self.keystone_version = read_config_option(self.config,
+                                                   'Basic',
+                                                   'keystone_version',
+                                                   'v2')
+        self.use_project_scoped_token = read_config_option(self.config,
+                                                   'Basic',
+                                                   'use_project_scoped_token',
+                                                   False)
+        self.domain_isolation = read_config_option(self.config,
+            'Basic',
+            'domain_isolation',
+            False) if self.keystone_version == 'v3' else False
+        self.cloud_admin_domain = read_config_option(self.config,
+            'Basic',
+            'cloud_admin_domain',
+            'Default')
+        self.tenant_isolation = read_config_option(self.config,
+            'Basic',
+            'tenant_isolation',
+            True)
+        self.user_isolation = read_config_option(self.config,
+            'Basic',
+            'user_isolation',
+            True)
+        # Read admin credentials if any
+
+        self.admin_username = read_config_option(self.config,
+            'Basic',
+            'adminUser',
+            os.getenv('OS_USERNAME', 'admin'))
+        self.admin_password = read_config_option(self.config,
+            'Basic',
+            'adminPassword',
+            os.getenv('OS_PASSWORD', 'contrail123'))
+        self.admin_tenant = read_config_option(self.config,
+            'Basic',
+            'adminTenant',
+            os.getenv('OS_TENANT_NAME', 'admin'))
+
+        self.admin_domain = read_config_option(self.config,
+            'Basic',
+            'adminDomain',
+            os.getenv('OS_DOMAIN_NAME',
+                ORCH_DEFAULT_DOMAIN.get(self.orchestrator)))
+
+        if self.orchestrator == 'kubernetes':
+            self.admin_tenant = 'default'
+            self.tenant_isolation = False
+        self.stack_user = read_config_option(
             self.config,
             'Basic',
             'stackUser',
-            'admin')
-        self.stack_password = stack_password or read_config_option(
+            self.admin_username)
+        self.stack_password = read_config_option(
             self.config,
             'Basic',
             'stackPassword',
-            'contrail123')
-        self.stack_tenant = read_config_option(self.config,
-                                               'Basic', 'stackTenant', 'admin')
+            self.admin_password)
+        self.stack_tenant = read_config_option(
+            self.config,
+            'Basic',
+            'stackTenant',
+            self.admin_tenant)
         self.stack_domain = read_config_option(
             self.config,
             'Basic',
             'stackDomain',
-            'default-domain')
-        self.project_fq_name = project_fq_name or \
-            [self.stack_domain, self.stack_tenant]
-        self.project_name = self.project_fq_name[1]
-        self.domain_name = self.project_fq_name[0]
+            os.getenv('OS_DOMAIN_NAME', self.admin_domain))
+        self.region_name = read_config_option(
+            self.config,
+            'Basic',
+            'stackRegion',
+            os.getenv('OS_REGION_NAME', 'RegionOne'))
+        self.availability_zone = read_config_option(
+            self.config,
+            'Basic',
+            'availability_zone',
+            None)
         self.endpoint_type = read_config_option(
             self.config,
             'Basic',
             'endpoint_type',
             'publicURL')
         self.auth_ip = read_config_option(self.config,
-                                              'Basic', 'auth_ip', None)
+                                          'Basic', 'auth_ip', None)
         self.auth_port = read_config_option(self.config,
-                                              'Basic', 'auth_port', None)
+                                            'Basic', 'auth_port', 5000)
+        self.auth_protocol = read_config_option(self.config,
+                                            'Basic', 'auth_protocol', 'http')
+        self.api_protocol = read_config_option(self.config,
+                                          'cfgm', 'api_protocol', 'http')
+        self.api_insecure = read_config_option(self.config,
+                                          'cfgm', 'api_insecure_flag', True)
+        self.api_server_port = read_config_option(self.config, 'services',
+                                          'config_api_port', '8082')
+        self.analytics_api_port = read_config_option(self.config, 'services',
+                                          'analytics_api_port', '8081')
+        self.bgp_port = read_config_option(self.config, 'services',
+                                          'control_port', '8083')
+        self.dns_port = read_config_option(self.config, 'services',
+                                          'dns_port', '8092')
+        self.agent_port = read_config_option(self.config, 'services',
+                                          'agent_port', '8085')
+        self.api_server_ip = read_config_option(self.config, 'services',
+                                          'config_api_ip', None)
+        self.analytics_api_ip = read_config_option(self.config, 'services',
+                                          'analytics_api_ip', None)
+        self.contrail_internal_vip = read_config_option(self.config, 'HA',
+                                          'contrail_internal_vip', None)
+        self.contrail_external_vip = read_config_option(self.config, 'HA',
+                                          'contrail_external_vip',
+                                          self.contrail_internal_vip)
+        self.internal_vip = read_config_option(self.config, 'HA',
+                                          'internal_vip', None)
+        self.external_vip = read_config_option(self.config, 'HA',
+                                          'external_vip', self.internal_vip)
         self.multi_tenancy = read_config_option(self.config,
                                                 'Basic', 'multiTenancy', False)
-        # Possible af values 'v4', 'v6' or 'dual'
-        # address_family = read_config_option(self.config,
-        #                      'Basic', 'AddressFamily', 'dual')
-        address_family = 'v4'
-        self.set_af(address_family)
-        self.log_scenario = read_config_option(
-            self.config,
-            'Basic',
-            'logScenario',
-            'Sanity')
-        if 'EMAIL_SUBJECT' in os.environ and os.environ['EMAIL_SUBJECT'] != '':
-            self.log_scenario = os.environ.get('EMAIL_SUBJECT')
-        self.generate_html_report = read_config_option(
-            self.config,
-            'Basic',
-            'generate_html_report',
-            True)
+        self.enable_ceilometer = read_config_option(self.config,
+                                                    'Basic', 'enable_ceilometer', False)
+        self.ci_flavor = read_config_option(self.config,
+                                            'Basic', 'ci_flavor', None)
+        self.config_amqp_ips = read_config_option(self.config,
+                                            'services', 'config_amqp_ips', None)
+        if self.config_amqp_ips:
+            self.config_amqp_ips = self.config_amqp_ips.split(',')
+        self.config_amqp_port = read_config_option(self.config,
+                                            'services', 'config_amqp_port', '5672')
         self.fixture_cleanup = read_config_option(
             self.config,
             'Basic',
             'fixtureCleanup',
             'yes')
-        # Web Server related details
-        self.web_server = read_config_option(self.config,
-                                             'WebServer', 'host', None)
-        self.web_server_user = read_config_option(
-            self.config,
-            'WebServer',
-            'username',
-            None)
-        self.web_server_password = read_config_option(
-            self.config,
-            'WebServer',
-            'password',
-            None)
-        self.web_server_report_path = read_config_option(
-            self.config,
-            'WebServer',
-            'reportPath',
-            None)
-        self.web_server_log_path = read_config_option(
-            self.config,
-            'WebServer',
-            'logPath',
-            None)
-        # Mail Setup
-        self.smtpServer = read_config_option(self.config,
-                                             'Mail', 'server', None)
-        self.smtpPort = read_config_option(self.config,
-                                           'Mail', 'port', None)
-        self.mailTo = read_config_option(self.config,
-                                         'Mail', 'mailTo', None)
-        self.mailSender = read_config_option(self.config,
-                                             'Mail', 'mailSender', None)
-
+        self.key_filename = read_config_option(self.config, 'Basic',
+                                               'key_filename', None)
+        self.pubkey_filename = read_config_option(self.config, 'Basic',
+                                                  'pubkey_filename', None)
         self.http_proxy = read_config_option(self.config,
                                              'proxy', 'proxy_url', None)
         self.ui_config = read_config_option(self.config,
@@ -171,11 +319,11 @@ class ContrailTestInit(fixtures.Fixture):
                                                'ui', 'webui', False)
         self.verify_horizon = read_config_option(self.config,
                                                  'ui', 'horizon', False)
-        if not self.ui_browser and self.verify_webui or self.verify_horizon:
-            raise ValueError(
-                "Verification via GUI needs 'browser' details. Please set the same.")
-        self.devstack = read_config_option(self.config,
-                                           'devstack', 'devstack', None)
+        self.kube_config_file = read_config_option(self.config,
+                                                   'kubernetes', 'config_file',
+                                                   '/etc/kubernetes/admin.conf')
+        self.use_devicemanager_for_md5 = read_config_option(
+            self.config, 'use_devicemanager_for_md5', 'use_devicemanager_for_md5', False)
         # router options
         self.mx_rt = read_config_option(self.config,
                                         'router', 'route_target', '10003')
@@ -187,6 +335,14 @@ class ContrailTestInit(fixtures.Fixture):
             'router_info',
             '[]')
         self.ext_routers = ast.literal_eval(router_info_tuples_string)
+
+        fabric_gw_info_tuples_string = read_config_option(
+            self.config,
+            'router',
+            'fabric_gw_info',
+            '[]')
+        self.fabric_gw_info = ast.literal_eval(fabric_gw_info_tuples_string)
+
         self.fip_pool_name = read_config_option(
             self.config,
             'router',
@@ -194,8 +350,6 @@ class ContrailTestInit(fixtures.Fixture):
             'public-pool')
         self.fip_pool = read_config_option(self.config,
                                            'router', 'fip_pool', None)
-        if self.fip_pool:
-            update_reserve_cidr(self.fip_pool)
         self.public_vn = read_config_option(
             self.config,
             'router',
@@ -207,19 +361,17 @@ class ContrailTestInit(fixtures.Fixture):
             'public_tenant_name',
             'public-tenant')
 
-        self.test_revision = read_config_option(self.config,
-                                                'repos', 'test_revision', None)
-        self.fab_revision = read_config_option(self.config,
-                                               'repos', 'fab_revision', None)
         # HA setup IPMI username/password
-        self.ha_setup = self.read_config_option('HA', 'ha_setup', None)
+        self.ha_setup = read_config_option(self.config, 'HA', 'ha_setup', None)
 
-        if self.ha_setup == 'True':
-            self.ipmi_username = self.read_config_option(
+        if self.ha_setup == True:
+            self.ipmi_username = read_config_option(
+                self.config,
                 'HA',
                 'ipmi_username',
                 'ADMIN')
-            self.ipmi_password = self.read_config_option(
+            self.ipmi_password = read_config_option(
+                self.config,
                 'HA',
                 'ipmi_password',
                 'ADMIN')
@@ -228,66 +380,972 @@ class ContrailTestInit(fixtures.Fixture):
             self.config,
             'debug',
             'verify_on_setup',
-            False)
+            True)
         self.stop_on_fail = bool(
             read_config_option(
                 self.config,
                 'debug',
                 'stop_on_fail',
                 None))
+        self.public_host = read_config_option(self.config, 'Basic',
+                                              'public_host', '10.204.216.50')
 
-        self.vcenter_dc = None
-        if self.orchestrator == 'vcenter':
-            self.vcenter_dc = self.read_config_option('vcenter', 'vcenter_dc', None)
+        if self.keystone_version == 'v3':
+            self.auth_url = os.getenv('OS_AUTH_URL') or \
+                        '%s://%s:%s/v3'%(self.auth_protocol,
+                                           self.auth_ip,
+                                           self.auth_port)
+            self.authn_url = '/v3/auth/tokens'
+        else:
+            self.auth_url = os.getenv('OS_AUTH_URL') or \
+                        '%s://%s:%s/v2.0'%(self.auth_protocol,
+                                           self.auth_ip,
+                                           self.auth_port)
+            self.authn_url = '/v2.0/tokens'
+        self._set_auth_vars()
+        self.apicertfile = read_config_option(self.config,
+                                             'cfgm', 'api_certfile', DEFAULT_CERT)
+        self.apikeyfile = read_config_option(self.config,
+                                            'cfgm', 'api_keyfile', DEFAULT_PRIV_KEY)
+        self.apicafile = read_config_option(self.config,
+                                           'cfgm', 'api_cafile', DEFAULT_CA)
+        self.api_insecure = bool(read_config_option(self.config,
+                                 'cfgm', 'api_insecure_flag', False))
 
-        self.check_juniper_intranet()
+        self.introspect_certfile = read_config_option(self.config,
+                                             'introspect', 'introspect_certfile', DEFAULT_CERT)
+        self.introspect_keyfile = read_config_option(self.config,
+                                            'introspect', 'introspect_keyfile', DEFAULT_PRIV_KEY)
+        self.introspect_cafile = read_config_option(self.config,
+                                           'introspect', 'introspect_cafile', DEFAULT_CA)
+        self.introspect_insecure = bool(read_config_option(self.config,
+                                 'introspect', 'introspect_insecure_flag', True))
+        self.introspect_protocol = read_config_option(self.config,
+                                          'introspect', 'introspect_protocol', 'http')
 
-        self.ha_tmp_list = []
+        self.keystonecertfile = read_config_option(self.config,
+                                'Basic', 'keystone_certfile',
+                                os.getenv('OS_CERT', None))
+        self.keystonekeyfile = read_config_option(self.config,
+                               'Basic', 'keystone_keyfile',
+                               os.getenv('OS_KEY', None))
+        self.keystonecafile = read_config_option(self.config,
+                              'Basic', 'keystone_cafile',
+                              os.getenv('OS_CACERT', None))
+        self.insecure = bool(read_config_option(self.config,
+                             'Basic', 'keystone_insecure_flag', False))
+        self.prov_data = self.read_prov_file()
+        #vcenter server
+        self.vcenter_dc = read_config_option(
+           self.config, 'vcenter', 'vcenter_dc', None)
+        self.vcenter_server = read_config_option(
+           self.config, 'vcenter', 'vcenter_server', None)
+        self.vcenter_port = read_config_option(
+           self.config, 'vcenter', 'vcenter_port', None)
+        self.vcenter_username = read_config_option(
+           self.config, 'vcenter', 'vcenter_username', None)
+        self.vcenter_password = read_config_option(
+           self.config, 'vcenter', 'vcenter_password', None)
+        self.vcenter_compute = read_config_option(
+           self.config, 'vcenter', 'vcenter_compute', None)
+        #for multiple vcenter
+        try:
+            if 'vcenter_servers' in self.prov_data.keys():
+                for server in self.prov_data['vcenter_servers']:
+                    for dc in server['datacenters']:
+                        for dv in server['datacenters'][dc]['dv_switches']:
+                            self.dv_switch = dv
+            elif 'vcenter' in self.prov_data.keys():
+                self.dv_switch = self.prov_data['vcenter'][0]['dv_switch']['dv_switch_name']
+        except Exception as e:
+            pass
+        self.gc_host_mgmt = read_config_option(self.config,
+                                             'global-controller', 'gc_host_mgmt', 'None')
+        self.gc_host_control_data = read_config_option(self.config,
+                                             'global-controller', 'gc_host_control_data', 'None')
+        self.gc_user_name = read_config_option(self.config,
+                                             'global-controller', 'gc_user_name', 'None')
+        self.gc_user_pwd = read_config_option(self.config,
+                                             'global-controller', 'gc_user_pwd', 'None')
+        self.keystone_password = read_config_option(self.config,
+                                             'global-controller', 'keystone_password', 'None')
+	self.ixia_linux_host_ip = read_config_option(self.config,
+                                             'traffic_data', 'ixia_linux_host_ip', None)
+	self.ixia_host_ip = read_config_option(self.config,
+                                             'traffic_data', 'ixia_host_ip', None)
+	self.spirent_linux_host_ip = read_config_option(self.config,
+                                             'traffic_data', 'spirent_linux_host_ip', None)
+	self.ixia_linux_username = read_config_option(self.config,
+	                                     'traffic_data', 'ixia_linux_username', None)
+	self.ixia_linux_password = read_config_option(self.config,
+                                             'traffic_data', 'ixia_linux_password', None)
+	self.spirent_linux_username = read_config_option(self.config,
+                                             'traffic_data', 'spirent_linux_username', None)
+	self.spirent_linux_password = read_config_option(self.config,
+                                             'traffic_data', 'spirent_linux_password', None)
+        #Report Parsing
+        self.log_scenario = read_config_option(self.config,
+                                               'Basic', 'logScenario', 'Sanity')
+        self.image_web_server = read_config_option(self.config,
+            'Basic',
+            'image_web_server',
+            os.getenv('IMAGE_WEB_SERVER') or '10.204.216.50')
+        # Web Server related details
+        self.web_server = read_config_option(self.config,
+                                             'WebServer', 'host', None)
+        self.web_server_user = read_config_option(self.config,
+                                                  'WebServer', 'username', None)
+        self.web_server_password = read_config_option(self.config,
+                                                      'WebServer', 'password', None)
+        self.web_server_report_path = read_config_option(self.config,
+                                                         'WebServer', 'reportPath', None)
+        self.web_server_log_path = read_config_option(self.config,
+                                                      'WebServer', 'logPath', None)
+        self.web_root = read_config_option(self.config,
+                                           'WebServer', 'webRoot', None)
+        # Mail Setup
+        self.smtpServer = read_config_option(self.config,
+                                             'Mail', 'server', None)
+        self.smtpPort = read_config_option(self.config,
+                                           'Mail', 'port', '25')
+        self.mailTo = read_config_option(self.config,
+                                         'Mail', 'mailTo', None)
+        self.mailSender = read_config_option(self.config,
+                                             'Mail', 'mailSender', 'contrailbuild@juniper.net')
+
+    def _set_auth_vars(self):
+        '''
+        Set auth_protocol, auth_ip, auth_port from self.auth_url
+        '''
+        match = re.match(r'(.*?)://(.*?):([\d]+).*$', self.auth_url, re.M|re.I)
+        if match:
+            self.auth_protocol = match.group(1)
+            self.auth_ip = match.group(2)
+            self.auth_port = match.group(3)
+    # end _set_auth_vars
+
+    def get_ip_of_nic(self, host, nic, **kwargs):
+        #Pattern match borrowed from contrail-container-builder for consistency
+        cmd = "ip addr show dev %s | grep 'inet .*/.* brd ' | awk '{print $2}'"%nic
+        cidr = self.run_cmd_on_server(host, cmd, **kwargs)
+        return str(IPNetwork(cidr).ip)
+
+    def parse_topo(self):
+        self.host_names = []
+        self.cfgm_ip = ''
+        self.cfgm_ips = []
+        self.cfgm_control_ips = []
+        self.cfgm_names = []
+        self.openstack_ip = ''
+        self.openstack_ips = []
+        self.openstack_control_ips = []
+        self.openstack_names = []
+        self.collector_ips = []
+        self.collector_control_ips = []
+        self.collector_names = []
+        self.database_ips = []
+        self.database_names = []
+        self.database_control_ips = []
+        self.compute_ips = []
+        self.compute_names = []
+        self.compute_control_ips = []
+        self.compute_info = {}
+        self.bgp_ips = []
+        self.bgp_control_ips = []
+        self.bgp_names = []
+        self.host_ips = []
+        self.webui_ips = []
+        self.webui_control_ips = []
+        self.kube_manager_ips = []
+        self.kube_manager_control_ips = []
+        self.k8s_master_ip = ""
+        self.k8s_slave_ips = []
+        self.host_data = {}
+        self.tor = {}
+        self.tor_hosts_data = {}
+        self.physical_routers_data = {}
+        self.vcenter_compute_ips= []
+        self.qos_queue = []
+        self.qos_queue_pg_properties = []
+        self.ns_agilio_vrouter_data = {}
+        self.esxi_vm_ips = {}
+        self.vgw_data = {}
+        self.hypervisors = {}
+        provider_configs = (self.config.get('provider_config') or {}).get('bms') or {}
+        username = provider_configs.get('ssh_user') or 'root'
+        password = provider_configs.get('ssh_pwd') or 'c0ntrail123'
+        for host, values  in (self.config.get('instances') or {}).iteritems():
+            roles = values.get('roles') or {}
+            host_data = dict()
+            host_data['host_ip'] = values['ip']
+            host_data['username'] = username
+            host_data['password'] = password
+            self.host_data[host_data['host_ip']] = host_data
+            hostname = self.run_cmd_on_server(host_data['host_ip'], 'hostname')
+            host_fqname = self.run_cmd_on_server(host_data['host_ip'], 'hostname -f')
+            interface = self.contrail_configs.get('PHYSICAL_INTERFACE')
+            host_data_ip = host_control_ip = host_data['host_ip']
+            if interface:
+                interface = 'vhost0' if 'vrouter' in roles else interface
+                host_data_ip = host_control_ip = self.get_ip_of_nic(host_data['host_ip'], interface)
+            self.host_names.append(hostname)
+            self.host_ips.append(host_data['host_ip'])
+            host_data['name'] = hostname
+            host_data['fqname'] = host_fqname
+            host_data['data-ip'] = host_data['host_data_ip'] = host_data_ip
+            host_data['control-ip'] = host_data['host_control_ip'] = host_control_ip
+            self.host_data[host_fqname] = self.host_data[hostname] = \
+                self.host_data[host_data_ip] = self.host_data[host_control_ip] = host_data
+            self._check_containers(host_data)
+            qos_queue_per_host, qos_queue_pg_properties_per_host = \
+                                    self._process_qos_data(host_data['host_ip'])
+            if qos_queue_per_host:
+                self.qos_queue.append(qos_queue_per_host)
+            if qos_queue_pg_properties_per_host:
+                self.qos_queue_pg_properties.append(qos_queue_pg_properties_per_host)
+            if 'openstack' in roles:
+                self.openstack_ip = host_data['host_ip']
+                self.openstack_ips.append(host_data['host_ip'])
+                self.openstack_control_ips.append(host_control_ip)
+                self.openstack_control_ip = host_control_ip
+                self.openstack_names.append(hostname)
+            if 'config' in roles:
+                self.cfgm_ip = host_data['host_control_ip']
+                #self.cfgm_ip = host_data['host_ip']
+                self.cfgm_ips.append(host_data['host_control_ip'])
+                #self.cfgm_ips.append(host_data['host_ip'])
+                self.cfgm_control_ips.append(host_control_ip)
+                self.cfgm_control_ip = host_control_ip
+                self.cfgm_names.append(hostname)
+                self.hostname = hostname
+            if 'vrouter' in roles:
+                self.compute_ips.append(host_data['host_ip'])
+                self.compute_names.append(hostname)
+                self.compute_info[hostname] = host_data['host_ip']
+                self.compute_control_ips.append(host_control_ip)
+            if 'control' in roles:
+                self.bgp_ips.append(host_data['host_ip'])
+                self.bgp_control_ips.append(host_control_ip)
+                self.bgp_names.append(hostname)
+            if 'webui' in roles:
+                self.webui_ip = host_data['host_ip']
+                self.webui_ips.append(host_data['host_ip'])
+                self.webui_control_ips.append(host_control_ip)
+            if 'analytics' in roles:
+                self.collector_ip = host_data['host_ip']
+                self.collector_ips.append(host_data['host_ip'])
+                self.collector_control_ips.append(host_control_ip)
+                self.collector_names.append(hostname)
+            if 'analytics_database' in roles:
+                self.database_ip = host_data['host_ip']
+                self.database_ips.append(host_data['host_ip'])
+                self.database_names.append(hostname)
+                self.database_control_ips.append(host_control_ip)
+            if 'kubemanager' in roles:
+                self.kube_manager_ips.append(host_data['host_ip'])
+                self.kube_manager_control_ips.append(host_control_ip)
+            if 'k8s_master' in roles:
+                self.k8s_master_ip = host_data['host_ip'] #K8s Currently only supports 1 master
+            if 'k8s_node' in roles:
+                self.k8s_slave_ips.append(host_data['host_ip'])
+        # end for
+
+    def get_roles(self, host):
+        roles = list()
+        host_ip = self.get_host_ip(host)
+        host_data_ip = self.get_host_data_ip(host)
+        if host_ip in self.cfgm_ips or host_data_ip in self.cfgm_ips:
+            roles.append('config')
+            roles.append('config-database')
+        if host_ip in self.compute_ips or host_data_ip in self.compute_control_ips:
+            roles.append('vrouter')
+        if host_ip in self.bgp_ips or host_data_ip in self.bgp_control_ips:
+            roles.append('control')
+        if host_ip in self.collector_ips or host_data_ip in self.collector_control_ips:
+            roles.append('analytics')
+        if host_ip in self.database_ips or host_data_ip in self.database_control_ips:
+            roles.append('analytics-database')
+        if host_ip in self.webui_ips or host_data_ip in self.webui_control_ips:
+            roles.append('webui')
+        if host_ip in self.kube_manager_ips or host_data_ip in self.kube_manager_control_ips:
+            roles.append('kubernetes')
+        return roles
+
+    def _gen_auth_url(self):
+        if self.keystone_version == 'v3':
+            auth_url = 'http://%s:5000/v3'%(self.external_vip or self.openstack_ip)
+        else:
+            auth_url = 'http://%s:5000/v2.0'%(self.external_vip or self.openstack_ip)
+        return auth_url
+
+    def parse_yml_file(self):
+        self.key = 'key1'
+        self.use_project_scoped_token = True
+        self.insecure = self.api_insecure = self.introspect_insecure = True
+        self.keystonecertfile = self.keystonekeyfile = self.keystonecafile = None
+        self.apicertfile = self.apikeyfile = self.apicafile = None
+        self.introspect_certfile = self.introspect_keyfile = self.introspect_cafile = None
+        self.multi_tenancy = True
+        self.enable_ceilometer = True
+        self.vcenter_gateway = []
+        self.orchs = []
+        self.vcenter_gw_setup = False
+        self.vcenter_present_in_this_setup = False
+        self.vcenter_dc = self.vcenter_server = self.vcenter_port = None
+        self.vcenter_username = self.vcenter_password = None
+        self.vcenter_compute = None
+
+        with open(self.input_file, 'r') as fd:
+            self.config = yaml.load(fd)
+        deployment_configs = self.config.get('deployment', {})
+        self.deployer = deployment_configs.get('deployer', 'contrail-ansible-deployer')
+        self.contrail_configs = contrail_configs = \
+            self.config.get('contrail_configuration') or {}
+        self.orchestrator_configs = orchestrator_configs = \
+            self.config.get('orchestrator_configuration') or {}
+        test_configs = self.config.get('test_configuration') or {}
+        self.orchestrator = deployment_configs.get('orchestrator') or 'openstack'
+        self.slave_orchestrator = deployment_configs.get('slave_orchestrator')
+        self.parse_topo()
+
+        # contrail related configs
+        self.api_protocol = 'https' if contrail_configs.get('CONFIG_API_USE_SSL') else 'http'
+        self.api_server_port = contrail_configs.get('CONFIG_API_PORT') or '8082'
+        self.analytics_api_port = contrail_configs.get('ANALYTICS_API_PORT') or '8081'
+        self.bgp_port = contrail_configs.get('CONTROL_INTROSPECT_PORT') or '8083'
+        self.dns_port = contrail_configs.get('DNS_INTROSPECT_PORT') or '8092'
+        self.agent_port = '8085'
+        self.api_server_ip = contrail_configs.get('CONFIG_API_VIP')
+        self.analytics_api_ip = contrail_configs.get('ANALYTICS_API_VIP')
+        self.config_amqp_ips = contrail_configs.get('RABBITMQ_NODES')
+        self.config_amqp_port = contrail_configs.get('RABBITMQ_NODE_PORT', 5672)
+        self.contrail_internal_vip = self.contrail_external_vip = self.api_server_ip
+        self.xmpp_auth_enable = contrail_configs.get('XMPP_SSL_ENABLE')
+        self.xmpp_dns_auth_enable = contrail_configs.get('XMPP_SSL_ENABLE')
+
+        # openstack related configs
+        keystone_configs = orchestrator_configs.get('keystone') or {}
+        self.keystone_version = keystone_configs.get('version') or 'v3'
+        self.admin_username = keystone_configs.get('username') or \
+                                  os.getenv('OS_USERNAME', 'admin')
+        self.admin_password = keystone_configs.get('password') or \
+                                  os.getenv('OS_PASSWORD', 'c0ntrail123')
+        self.admin_tenant = keystone_configs.get('tenant') or \
+                                os.getenv('OS_TENANT_NAME', 'admin')
+        self.admin_domain = keystone_configs.get('domain') or \
+                                os.getenv('OS_DOMAIN_NAME',
+                                ORCH_DEFAULT_DOMAIN.get(self.orchestrator))
+        self.region_name = keystone_configs.get('region') or \
+                               os.getenv('OS_REGION_NAME', 'RegionOne')
+        if self.keystone_version == 'v3':
+            self.authn_url = '/v3/auth/tokens'
+        else:
+            self.authn_url = '/v2.0/tokens'
+        if self.orchestrator == 'kubernetes':
+            self.admin_tenant = 'default'
+        self.internal_vip = orchestrator_configs.get('internal_vip')
+        self.external_vip = orchestrator_configs.get('external_vip') or self.internal_vip
+        # test specific configs
+        self.auth_url = test_configs.get('auth_url') or os.getenv('OS_AUTH_URL',
+                                                     self._gen_auth_url())
+        self.stack_user = test_configs.get('stack_user') or self.admin_username
+        self.stack_password = test_configs.get('stack_user') or self.admin_password
+        self.stack_tenant = test_configs.get('stack_tenant') or self.admin_tenant
+        self.stack_domain = test_configs.get('stack_domain') or self.admin_domain
+        self.availability_zone = test_configs.get('availability_zone')
+        self.use_project_scoped_token = test_configs.get('use_project_scoped_token') or False
+        self.domain_isolation = test_configs.get('domain_isolation') or False
+        self.tenant_isolation = False if test_configs.get('tenant_isolation') is False else True
+        self.user_isolation = False if test_configs.get('user_isolation') is False else True
+        self.ci_flavor = test_configs.get('ci_image_flavor')
+        self.key_filename = test_configs.get('nova_keypair_private_key_filename')
+        self.pubkey_filename = test_configs.get('nova_keypair_public_key_filename')
+
+        self.fixture_cleanup = test_configs.get('fixture_cleanup', 'yes')
+        self.http_proxy = test_configs.get('http_proxy')
+        self.ui_config = test_configs.get('ui_config')
+        self.ui_browser = test_configs.get('ui_browser')
+        self.verify_webui = test_configs.get('verify_webui', False)
+        self.verify_horizon = test_configs.get('verify_horizon', False)
+        self.use_devicemanager_for_md5 = test_configs.get('use_devicemanager_for_md5', False)
+        self.verify_on_setup = False if test_configs.get('verify_on_setup') is False else True
+        self.stop_on_fail = test_configs.get('stop_on_fail') or False
+        self.public_host = test_configs.get('public_host') or '10.204.216.50'
+        self.public_vn = test_configs.get('public_virtual_network') or 'public-network'
+        self.fip_pool = test_configs.get('public_subnet')
+        self.fip_pool_name = test_configs.get('fip_pool_name')
+        self.public_tenant = test_configs.get('public_tenant_name')
+        self.mx_rt = test_configs.get('public_rt')
+        self.router_asn = test_configs.get('router_asn') or '64512'
+        self.kube_config_file = test_configs.get('kube_config_file') or '/etc/kubernetes/admin.conf'
+        self.ext_routers = []
+        for rtr_name, address in test_configs.get('ext_routers', {}).iteritems():
+            self.ext_routers.append((rtr_name, address))
+        self.fabric_gw_info = []
+        for gw_name, address in test_configs.get('fabric_gw', {}).iteritems():
+            self.fabric_gw_info.append((gw_name, address))
+        if 'traffic_generator' in test_configs:
+            traffic_gen = test_configs['traffic_generator']
+	    self.ixia_linux_host_ip = traffic_gen.get('ixia_linux_host_ip')
+	    self.ixia_host_ip = traffic_gen.get('ixia_host_ip')
+	    self.spirent_linux_host_ip = traffic_gen.get('spirent_linux_host_ip')
+	    self.ixia_linux_username = traffic_gen.get('ixia_linux_username')
+	    self.ixia_linux_password = traffic_gen.get('ixia_linux_password')
+	    self.spirent_linux_username = traffic_gen.get('spirent_linux_username')
+	    self.spirent_linux_password = traffic_gen.get('spirent_linux_password')
+        if 'device_manager' in test_configs:
+            self.dm_mx = test_configs['device_manager']
+        if 'ns_agilio_vrouter' in test_configs:
+            self.pcap_on_vm = True
+        if not self.config_amqp_ips:
+            self.config_amqp_ips = self.openstack_control_ips if \
+                                   self.openstack_control_ips else\
+                                   self.cfgm_control_ips  #vcenter only mode
+        self.many_computes = (len(self.compute_ips) > 10) or False
+        self._set_auth_vars()
+        if self.orchestrator == 'kubernetes':
+            self.tenant_isolation = False
+#        self.endpoint_type = test_configs.get('endpoint_type')
+#        self.cloud_admin_domain = test_configs.get('cloud_admin_domain', 'Default')
+        self.image_web_server = test_configs.get('image_web_server') or \
+                                os.getenv('IMAGE_WEB_SERVER') or '10.204.216.50'
+        # Report Gen related parsers
+        report_configs = test_configs.get('report') or {}
+        self.log_scenario = report_configs.get('log_scenario') or 'Sanity'
+        # Web Server related details
+        webserver_configs = test_configs.get('web_server') or {}
+        self.web_server = webserver_configs.get('server')
+        self.web_server_user = webserver_configs.get('username')
+        self.web_server_password = webserver_configs.get('password')
+        self.web_server_report_path = webserver_configs.get('report_path')
+        self.web_server_log_path = webserver_configs.get('log_path')
+        self.web_root = webserver_configs.get('web_root')
+        # Mail Setup
+        mailserver_configs = test_configs.get('mail_server') or {}
+        self.smtpServer = mailserver_configs.get('server')
+        self.smtpPort = mailserver_configs.get('port') or '25'
+        self.mailTo = mailserver_configs.get('to')
+        self.mailSender = mailserver_configs.get('sender') or 'contrailbuild@juniper.net'
+
+    def get_os_env(self, var, default=''):
+        if var in os.environ:
+            return os.environ.get(var)
+        else:
+            return default
+    # end get_os_env
+
+    def get_os_version(self, host_ip):
+        '''
+        Figure out the os type on each node in the cluster
+        '''
+        output = None
+        a_container = None
+        if host_ip in self.os_type:
+            return self.os_type[host_ip]
+        username = self.host_data[host_ip]['username']
+        password = self.host_data[host_ip]['password']
+        containers = self.host_data[host_ip]['containers'].keys()
+        if containers :
+            a_container = containers[0]
+        with hide('output','running','warnings'):
+            output = self.run_cmd_on_server(host_ip,
+                        'uname -a', username, password, container=a_container)
+        if 'el6' in output:
+            self.os_type[host_ip] = 'centos_el6'
+        elif 'fc17' in output:
+            self.os_type[host_ip] = 'fc17'
+        elif 'xen' in output:
+            self.os_type[host_ip] = 'xenserver'
+        elif 'Ubuntu' in output:
+            self.os_type[host_ip] = 'ubuntu'
+        elif 'el7' in output:
+            self.os_type[host_ip] = 'redhat'
+        else:
+            raise KeyError('Unsupported OS')
+        return self.os_type[host_ip]
+    # end get_os_version
+
+    def get_active_containers(self, host):
+        cmd = "docker ps -f status=running --format {{.Names}} 2>/dev/null"
+        output = self.run_cmd_on_server(host, cmd, as_sudo=True)
+        containers = [x.strip('\r') for x in output.split('\n')]
+        return containers
+
+    def _check_containers(self, host_dict):
+        '''
+        Find out which components have containers and set
+        corresponding attributes in host_dict to True if present
+        '''
+        host_dict['containers'] = {}
+        if  host_dict.get('type', None) == 'esxi':
+            return
+        cmd = 'docker ps 2>/dev/null | grep -v "/pause" | awk \'{print $NF}\''
+        output = self.run_cmd_on_server(host_dict['host_ip'], cmd, as_sudo=True)
+        # If not a docker cluster, return
+        if not output:
+            return
+        containers = [x.strip('\r') for x in output.split('\n')]
+
+        for service, names in CONTRAIL_SERVICES_CONTAINER_MAP.iteritems():
+            for name in names:
+                container = next((container for container in containers if name in container), None)
+                if container:
+                    host_dict['containers'][service] = container
+                    containers.remove(container)
+                    break
+
+        # Added for backward compatibility can be removed when we dont have fat containers
+        for container in containers:
+            if '_network_' not in container:
+                host_dict['containers'][container] = container
+        if 'nova' in host_dict['containers']:
+            host_dict['containers']['openstack'] = host_dict['containers']['nova']
+        if 'schema' not in host_dict['containers'] and 'controller' in host_dict['containers']:
+            host_dict['containers']['api-server'] = host_dict['containers']['controller']
+            host_dict['containers']['svc-monitor'] = host_dict['containers']['controller']
+            host_dict['containers']['schema'] = host_dict['containers']['controller']
+            host_dict['containers']['control'] = host_dict['containers']['controller']
+            host_dict['containers']['dns'] = host_dict['containers']['controller']
+            host_dict['containers']['named'] = host_dict['containers']['controller']
+        if 'alarm-gen' not in host_dict['containers'] and 'analytics' in host_dict['containers']:
+            host_dict['containers']['analytics-api'] = host_dict['containers']['analytics']
+            host_dict['containers']['alarm-gen'] = host_dict['containers']['analytics']
+            host_dict['containers']['collector'] = host_dict['containers']['analytics']
+            host_dict['containers']['query-engine'] = host_dict['containers']['analytics']
+        if 'analytics-cassandra' not in host_dict['containers'] and 'analyticsdb' in host_dict['containers']:
+            host_dict['containers']['analytics-cassandra'] = host_dict['containers']['analyticsdb']
+    # end _check_containers
+
+    def read_prov_file(self):
+        prov_file = open(self.prov_file, 'r')
+        prov_data = prov_file.read()
+        json_data = json.loads(prov_data)
+        self.host_names = []
+        self.cfgm_ip = ''
+        self.cfgm_ips = []
+        self.cfgm_control_ips = []
+        self.cfgm_names = []
+        self.openstack_ip = ''
+        self.openstack_ips = []
+        self.openstack_control_ips = []
+        self.openstack_names = []
+        self.collector_ips = []
+        self.collector_control_ips = []
+        self.collector_names = []
+        self.database_ips = []
+        self.database_names = []
+        self.database_control_ips = []
+        self.compute_ips = []
+        self.compute_names = []
+        self.compute_control_ips = []
+        self.compute_info = {}
+        self.bgp_ips = []
+        self.bgp_control_ips = []
+        self.bgp_names = []
+        self.host_ips = []
+        self.webui_ips = []
+        self.webui_control_ips = []
+        self.kube_manager_ips = []
+        self.kube_manager_control_ips = []
+        self.k8s_master_ip = ""
+        self.k8s_slave_ips = []
+        self.host_data = {}
+        self.tor = {}
+        self.tor_hosts_data = {}
+        self.physical_routers_data = {}
+        self.qos_queue = []
+        self.vcenter_compute_ips= []
+        ''' self.qos_queue used for populating HW to Logical map
+            format self.qos_queue = [['comput_ip' , [{'hw_q_id':[logical_ids]}, {'hw_q_id':[logical_ids]}]]]
+            eg, self.qos_queue= [['10.204.217.128', [{u'3': [u'1', u'6-10', u'12-15']}, {u'11': [u'40-46']}]],
+                            , ['10.204.217.130', [{u'4': [u'1', u'6-10', u'12-15']}, {u'12': [u'40-46']}]]]'''
+        self.qos_queue_pg_properties = []
+        ''' self.qos_queue_pg_properties used for populating per Priority Group Properties
+            format self.qos_queue_pg_properties = [['comput_ip' , [{1st PG properties}, {2nd PG properties}]]]
+            eg, self.qos_queue_pg_properties = [['10.204.217.128', [{u'scheduling': u'strict', u'bandwidth': u'0', u'priority_id': u'0'},
+                                                                {u'scheduling': u'rr', u'bandwidth': u'10', u'priority_id': u'2'}]],
+                            ,                ['10.204.217.130', [{u'scheduling': u'strict', u'bandwidth': u'0', u'priority_id': u'1'},
+                                                                {u'scheduling': u'rr', u'bandwidth': u'25', u'priority_id': u'3'}]]]'''
+        self.ns_agilio_vrouter_data = {}
+
+        self.esxi_vm_ips = {}
+        self.vgw_data = {}
+        self.hypervisors = {}
+        for host in json_data['hosts']:
+            host['name'] = host['name']
+            self.host_names.append(host['name'])
+            host_ip = str(IPNetwork(host['ip']).ip)
+            host_data_ip = str(IPNetwork(host['data-ip']).ip)
+            host_control_ip = str(IPNetwork(host['control-ip']).ip)
+            self.host_ips.append(host_ip)
+            self.host_data[host_ip] = host
+            self.host_data[host_data_ip] = host
+            self.host_data[host_control_ip] = host
+            self.host_data[host['name']] = host
+            self.host_data[host['name']]['host_ip'] = host_ip
+            self.host_data[host['name']]['host_data_ip'] = host_data_ip
+            self.host_data[host['name']]['host_control_ip'] = host_control_ip
+            if host.get('fqname', None):
+                self.host_data[host['fqname']] = self.host_data[host['name']]
+            self._check_containers(host)
+            qos_queue_per_host, qos_queue_pg_properties_per_host = \
+                                    self._process_qos_data(host_ip)
+            if qos_queue_per_host:
+                self.qos_queue.append(qos_queue_per_host)
+            if qos_queue_pg_properties_per_host:
+                self.qos_queue_pg_properties.append(qos_queue_pg_properties_per_host)
+            roles = host["roles"]
+            for role in roles:
+                if role['type'] == 'openstack':
+                    self.openstack_ip = host_ip
+                    self.openstack_ips.append(host_ip)
+                    self.openstack_control_ips.append(host_control_ip)
+                    self.openstack_control_ip = host_control_ip
+                    self.openstack_names.append(host['name'])
+                    if role['container']:
+                        host['containers']['openstack'] = role['container']
+                if role['type'] == 'cfgm':
+                    self.cfgm_ip = host_ip
+                    self.cfgm_ips.append(host_ip)
+                    self.cfgm_control_ips.append(host_control_ip)
+                    self.cfgm_control_ip = host_control_ip
+                    self.cfgm_names.append(host['name'])
+                    self.masterhost = self.cfgm_ip
+                    self.hostname = host['name']
+                    if role['container']:
+                        host['containers']['controller'] = role['container']
+                if role['type'] == 'compute':
+                    self.compute_ips.append(host_ip)
+                    self.compute_names.append(host['name'])
+                    self.compute_info[host['name']] = host_ip
+                    self.compute_control_ips.append(host_control_ip)
+                    if role['container']:
+                        host['containers']['agent'] = role['container']
+                if role['type'] == 'bgp':
+                    self.bgp_ips.append(host_ip)
+                    self.bgp_control_ips.append(host_control_ip)
+                    self.bgp_names.append(host['name'])
+                if role['type'] == 'webui':
+                    self.webui_ip = host_ip
+                    self.webui_ips.append(host_ip)
+                    self.webui_control_ips.append(host_control_ip)
+                if role['type'] == 'collector':
+                    self.collector_ip = host_ip
+                    self.collector_ips.append(host_ip)
+                    self.collector_control_ips.append(host_control_ip)
+                    self.collector_names.append(host['name'])
+                    if role['container']:
+                        host['containers']['analytics'] = role['container']
+                if role['type'] == 'database':
+                    self.database_ip = host_ip
+                    self.database_ips.append(host_ip)
+                    self.database_names.append(host['name'])
+                    self.database_control_ips.append(host_control_ip)
+                    if role['container']:
+                        host['containers']['analyticsdb'] = role['container']
+                if role['type'] == 'contrail-kubernetes':
+                    self.kube_manager_ips.append(host_ip)
+                    self.kube_manager_control_ips.append(host_control_ip)
+                if role['type'] == 'vcenter_compute':
+                    vcenter_compute_ip = host_ip
+                    self.vcenter_compute_ips.append(host_ip)
+            # end for
+        # end for
+
+        if 'vgw' in json_data:
+            self.vgw_data = json_data['vgw']
+
+        if 'xmpp_auth_enable' in json_data:
+            self.xmpp_auth_enable = json_data['xmpp_auth_enable']
+        if 'xmpp_dns_auth_enable' in json_data:
+            self.xmpp_dns_auth_enable = json_data['xmpp_dns_auth_enable']
+        if 'metadata_ssl_enable' in json_data:
+            self.metadata_ssl_enable = json_data['metadata_ssl_enable']
+
+        if 'dm_mx' in json_data:
+            self.dm_mx = json_data['dm_mx']
+
+        if 'tor_agent' in json_data:
+            self.tor_agent_data = json_data['tor_agent']
+        if 'sriov' in json_data:
+            self.sriov_data = json_data['sriov']
+        if 'dpdk' in json_data:
+            self.dpdk_data = json_data['dpdk']
+        if 'tor_hosts' in json_data:
+            self.tor_hosts_data = json_data['tor_hosts']
+        if 'kubernetes' in json_data and json_data['kubernetes'] != {}:
+            self.k8s_master_ip = json_data['kubernetes']['master'].split("@")[-1]
+            self.k8s_slave_ips = [value.split("@")[-1] for value in json_data['kubernetes']['slaves']]
+
+        if 'physical_routers' in json_data:
+            self.physical_routers_data = json_data['physical_routers']
+        if 'ns_agilio_vrouter' in json_data:
+            self.ns_agilio_vrouter_data = json_data['ns_agilio_vrouter']
+            if self.ns_agilio_vrouter_data:
+                self.pcap_on_vm = True
+
+        self._process_tor_data()
+        self._process_for_vcenter_gateway()
+        self._process_other_orchestrators(json_data)
+
+        if 'esxi_vms' in json_data:
+            self.esxi_vm_ips = json_data['esxi_vms']
+        if 'hosts_ipmi' in json_data:
+            self.hosts_ipmi = json_data['hosts_ipmi']
+
+        if not self.auth_ip:
+            if self.ha_setup and self.external_vip:
+                self.auth_ip = self.external_vip
+            else:
+                self.auth_ip = self.openstack_ip
+
+        # If no explicit amqp servers are configured, it will be cfgm ips
+        if not self.config_amqp_ips:
+            self.config_amqp_ips = self.openstack_control_ips if \
+                                   self.openstack_control_ips else\
+                                   self.cfgm_control_ips  #vcenter only mode
+
+        self.many_computes = (len(self.compute_ips) > 10) or False
+
+        if 'hypervisor' in json_data:
+            self.hypervisors = json_data['hypervisor']
+
+        return json_data
+    # end read_prov_file
+
+    def _process_for_vcenter_gateway(self):
+        self.vcenter_gateway = []
+        for (device_name, device_dict) in self.physical_routers_data.iteritems():
+            if ((device_dict.has_key('type')) and (device_dict['type'] in 'vcenter_gateway')):
+               self.vcenter_gateway.append(device_dict)
+    #end _process_for_vcenter_gateway
+
+    def _process_other_orchestrators(self,json_data):
+        self.orchs = []
+        #Depending on these 2 below flags, the tenant would be set to vCenter
+        self.vcenter_gw_setup = False
+        self.vcenter_present_in_this_setup = False
+        if 'other_orchestrators' in json_data:
+            for (orch_name, orch_dict) in json_data['other_orchestrators'].iteritems():
+                orch = {}
+                orch['name'] = orch_name
+                orch['type'] = orch_dict['type']
+                if orch['type'] == 'vcenter':
+                    orch['vcenter_server'] = orch_dict['vcenter_server']
+                    self.vcenter_present_in_this_setup = True
+                if 'gateway_vrouters' in orch_dict:
+                    orch['gateway_vrouters'] = orch_dict['gateway_vrouters']
+                    self.vcenter_gw_setup = True
+                if 'controller_refs' in orch_dict:
+                    orch['controller_refs'] = orch_dict['controller_refs']
+                self.orchs.append(orch)
+    # end _process_other_orchestrators
+
+    def get_vcenter_gateway(self):
+        for orch in self.orchs:
+            if orch['type'] == 'vcenter':
+                return random.choice(orch['gateway_vrouters'])
+
+    def _process_qos_data(self, host_ip):
+        '''
+        Reads and populate qos related values
+        '''
+        qos_queue_per_host = []
+        qos_queue_pg_properties_per_host = []
+        try:
+            if self.host_data[host_ip]['qos']:
+                hw_to_logical_map_list = []
+                for entry in self.host_data[host_ip]['qos']:
+                    if "default" in entry.keys() and \
+                    "logical_queue" in entry.keys():
+                        entry["logical_queue"].append("default")
+                        hw_to_logical_map = {entry["hardware_q_id"] :
+                                             entry["logical_queue"]}
+                    elif "default" in entry.keys() and \
+                    "logical_queue" not in entry.keys():
+                        hw_to_logical_map = {entry["hardware_q_id"] :
+                                             ["default"]}
+                    else:
+                        hw_to_logical_map = {entry["hardware_q_id"] :
+                                             entry["logical_queue"]}
+                    hw_to_logical_map_list.append(hw_to_logical_map)
+                qos_queue_per_host = [host_ip , hw_to_logical_map_list]
+        except KeyError, e:
+            pass
+        try:
+            if self.host_data[host_ip]['qos_niantic']:
+                pg_properties_list = []
+                for entry in self.host_data[host_ip]['qos_niantic']:
+                    if 'bandwidth' not in entry.keys():
+                        entry.update({'bandwidth' : "0"})
+                        pg_property = entry
+                    else:
+                        pg_property = entry
+                    pg_properties_list.append(pg_property)
+                qos_queue_pg_properties_per_host = [host_ip ,
+                                                     pg_properties_list]
+        except KeyError, e:
+            pass
+        return (qos_queue_per_host, qos_queue_pg_properties_per_host)
+
+    def _process_tor_data(self):
+        for (device_name, device_dict) in self.physical_routers_data.iteritems():
+            device_dict['tor_agents'] = []
+            device_dict['tor_agent_dicts'] = []
+            device_dict['tor_tsn_ips'] = []
+            for (host_str, ta_list) in self.tor_agent_data.iteritems():
+                for ta in ta_list:
+                    if ta['tor_name'] == device_dict['name']:
+                        ta['tor_agent_host_string'] = host_str
+                        device_dict['tor_ovs_port'] = ta['tor_ovs_port']
+                        device_dict['tor_ovs_protocol'] = ta[
+                            'tor_ovs_protocol']
+                        device_dict['tor_agents'].append('%s:%s' % (host_str,
+                                                                    ta['tor_id']))
+                        device_dict['tor_agent_dicts'].append(ta)
+                        device_dict['tor_tsn_ips'].append(ta['tor_tsn_ip'])
+                        if self.ha_setup == True:
+                            device_dict['controller_ip'] = self.contrail_external_vip
+                        else:
+                            device_dict['controller_ip'] = ta['tor_tsn_ip']
+
+    # end _process_tor_data
+
+    def get_host_ip(self, name):
+        try:
+            ip = self.host_data[name]['host_ip']
+        except KeyError:
+            short_name = name.split('.')[0]
+            ip = self.host_data[short_name]['host_ip']
+        if ip in self.ha_tmp_list:
+            ip = self.contrail_external_vip
+        return ip
+
+    def get_host_data_ip(self, name):
+        ip = self.host_data[name]['host_data_ip']
+        if ip in self.ha_tmp_list:
+            ip = self.contrail_internal_vip
+        return ip
+
+    def get_node_name(self, ip):
+        return self.host_data[ip]['name']
+
+    def get_mysql_token(self):
+        #ToDo: msenthil need to remove the usage of logging into mysqldb from fixtures
+        if self.mysql_token:
+            return self.mysql_token
+        if self.orchestrator == 'vcenter' or self.vcenter_present_in_this_setup:
+            return None
+        username = self.host_data[self.openstack_ip]['username']
+        password = self.host_data[self.openstack_ip]['password']
+        cmd = 'cat /etc/contrail/mysql.token'
+        with hide('everything'):
+            with settings(
+                    host_string='%s@%s' % (username, self.openstack_ip),
+                    password=password, warn_only=True, abort_on_prompts=False):
+                if not exists('/etc/contrail/mysql.token'):
+                    return None
+        self.mysql_token = self.run_cmd_on_server(
+            self.openstack_ip,
+            cmd,
+            username,
+            password,
+            container='openstack')
+        return self.mysql_token
+    # end get_mysql_token
+
+    def get_build_sku(self):
+        if not getattr(self, 'build_sku', None):
+            try:
+                self.build_sku = get_build_sku(self.openstack_ip,
+                     self.host_data[self.openstack_ip]['password'],
+                     self.host_data[self.openstack_ip]['username'],
+                     container=self.host_data[self.openstack_ip]['containers'].get('nova'))
+            except Exception as e:
+                self.build_sku='vcenter'		
+        return self.build_sku
+
+    def run_cmd_on_server(self, server_ip, issue_cmd, username=None,
+                          password=None, pty=True, as_sudo=True,
+                          container=None, detach=None, shell_prefix='/bin/bash -c '):
+        '''
+        container : name or id of the container
+        '''
+        if server_ip in self.host_data.keys():
+            if not username:
+                username = self.host_data[server_ip]['username']
+            if not password:
+                password = self.host_data[server_ip]['password']
+        if container:
+            cntr = self.host_data[server_ip].get('containers', {}).get(container)
+            # If the container does not exist on this host, log it and
+            # run the cmd on the host itself
+            # This helps backward compatibility
+            if not cntr:
+                self.logger.debug('Container %s not in host %s, running on '
+                    ' host itself' % (container, server_ip))
+            container = cntr
+        output = run_cmd_on_server(issue_cmd,
+                          server_ip,
+                          username,
+                          password,
+                          pty=pty,
+                          as_sudo=as_sudo,
+                          logger=self.logger,
+                          container=container,
+                          detach=detach,
+                          shell_prefix=shell_prefix)
+        return output
+    # end run_cmd_on_server
+
+
+class ContrailTestInit(object):
+    def __getattr__(self, attr):
+        return getattr(self.inputs, attr)
+
+    def __init__(
+            self,
+            input_file=None,
+            stack_user=None,
+            stack_password=None,
+            stack_tenant=None,
+            stack_domain=None,
+            logger=None):
+        self.connections = None
+        self.logger = logger or contrail_logging.getLogger(__name__)
+        self.inputs = TestInputs(input_file, self.logger)
+        self.stack_user = stack_user or self.stack_user
+        self.stack_password = stack_password or self.stack_password
+        self.stack_domain = stack_domain or self.stack_domain
+        self.stack_tenant = stack_tenant or self.stack_tenant
+        if self.stack_domain == 'Default':
+            self.project_fq_name = ['default-domain', self.stack_tenant]
+        else:
+            self.project_fq_name = [self.stack_domain, self.stack_tenant]
+        self.project_name = self.stack_tenant
+        self.domain_name = self.stack_domain
+        # Possible af values 'v4', 'v6' or 'dual'
+        # address_family = read_config_option(self.config,
+        #                      'Basic', 'AddressFamily', 'dual')
+        self.address_family = 'v4'
+        if self.orchestrator == 'kubernetes' or self.slave_orchestrator == 'kubernetes':
+            if not os.path.exists(self.kube_config_file):
+                self.copy_file_from_server(self.kube_manager_ips[0],
+                    self.kube_config_file, self.kube_config_file)
     # end __init__
 
-    def setUp(self):
-        super(ContrailTestInit, self).setUp()
-        if self.single_node != '':
-            self.prov_data = self._create_prov_data()
+    def is_ci_setup(self):
+        if os.environ.has_key('ci_image'):
+            return True
         else:
-            self.prov_data = self._read_prov_file()
-        self.os_type = self.get_os_version()
-        self.build_id = self.get_build_id()
+            return False
+    # end is_ci_setup
 
-        self.username = self.host_data[self.cfgm_ip]['username']
-        self.password = self.host_data[self.cfgm_ip]['password']
-        # List of service correspond to each module
-        self.compute_services = [
-            'contrail-vrouter-agent',
-            'supervisor-vrouter',
-            'contrail-vrouter-nodemgr']
-        self.control_services = ['contrail-control', 'supervisor-control',
-                                 'contrail-control-nodemgr', 'contrail-dns',
-                                 'contrail-named']
-        self.cfgm_services = [
-            'contrail-api',
-            'contrail-schema',
-            'contrail-discovery',
-            'supervisor-config',
-            'contrail-config-nodemgr',
-            'contrail-device-manager']
-        self.webui_services = ['contrail-webui', 'contrail-webui-middleware',
-                               'supervisor-webui']
-        self.openstack_services = [
-            'openstack-cinder-api', 'openstack-cinder-scheduler',
-            'openstack-cinder-scheduler', 'openstack-glance-api',
-            'openstack-glance-registry', 'openstack-keystone',
-            'openstack-nova-api', 'openstack-nova-scheduler',
-            'openstack-nova-cert']
-        self.collector_services = [
-            'contrail-collector', 'contrail-analytics-api',
-            'contrail-query-engine', 'contrail-analytics-nodemgr',
-            'supervisor-analytics', 'contrail-alarm-gen',
-            'contrail-snmp-collector', 'contrail-topology']
-        self.correct_states = ['active', 'backup']
-        self.mysql_token = self.get_mysql_token()
-        self.copy_fabfile_to_agents()
-    # end setUp
+    def set_af(self, af):
+        self.address_family = af
+
+    def get_af(self):
+        return self.address_family
 
     def verify_thru_gui(self):
         '''
@@ -305,326 +1363,27 @@ class ContrailTestInit(fixtures.Fixture):
             return self.ui_config
         return False
 
-    def set_af(self, af):
-        self.address_family = af
-
-    def get_af(self):
-        return self.address_family
-
-    def get_os_env(self, var):
-        if var in os.environ:
-            return os.environ.get(var)
-        else:
-            return ''
-    # end get_os_env
-
-    def get_os_version(self):
-        '''
-        Figure out the os type on each node in the cluster
-        '''
-
-        if self.os_type:
-            return self.os_type
-        for host_ip in self.host_ips:
-            username = self.host_data[host_ip]['username']
-            password = self.host_data[host_ip]['password']
-            with settings(
-                host_string='%s@%s' % (username, host_ip), password=password,
-                    warn_only=True, abort_on_prompts=False):
-                output = run('uname -a')
-                if 'el6' in output:
-                    self.os_type[host_ip] = 'centos_el6'
-                if 'fc17' in output:
-                    self.os_type[host_ip] = 'fc17'
-                if 'xen' in output:
-                    self.os_type[host_ip] = 'xenserver'
-                if 'Ubuntu' in output:
-                    self.os_type[host_ip] = 'ubuntu'
-                if 'el7' in output:
-                    self.os_type[host_ip] = 'redhat'
-        return self.os_type
-    # end get_os_version
-
-    def read_config_option(self, section, option, default_option):
-        ''' Read the config file. If the option/section is not present, return the default_option
-        '''
-        try:
-            val = self.config.get(section, option)
-            return val
-        except (ConfigParser.NoOptionError, ConfigParser.NoSectionError):
-            return default_option
-    # end read_config_option
-
-    def _read_prov_file(self):
-        prov_file = open(self.prov_file, 'r')
-        prov_data = prov_file.read()
-        #json_data = json.loads(prov_data)
-        json_data = ast.literal_eval(prov_data)
-        self.host_names = []
-        self.cfgm_ip = ''
-        self.cfgm_ips = []
-        self.cfgm_control_ips = []
-        self.cfgm_names = []
-        self.collector_ips = []
-        self.collector_control_ips = []
-        self.collector_names = []
-        self.database_ips = []
-        self.database_names = []
-        self.database_control_ips = []
-        self.compute_ips = []
-        self.compute_names = []
-        self.compute_control_ips = []
-        self.compute_info = {}
-        self.bgp_ips = []
-        self.bgp_control_ips = []
-        self.bgp_names = []
-        self.ds_server_ip = []
-        self.ds_server_name = []
-        self.host_ips = []
-        self.webui_ips = []
-        self.host_data = {}
-        self.vgw_data = {}
-        self.vip = {}
-        for host in json_data['hosts']:
-            self.host_names.append(host['name'])
-            host_ip = str(IPNetwork(host['ip']).ip)
-            host_data_ip = str(IPNetwork(host['data-ip']).ip)
-            host_control_ip = str(IPNetwork(host['control-ip']).ip)
-            self.host_ips.append(host_ip)
-            self.host_data[host_ip] = host
-            self.host_data[host_data_ip] = host
-            self.host_data[host_control_ip] = host
-            self.host_data[host['name']] = host
-            self.host_data[host['name']]['host_ip'] = host_ip
-            self.host_data[host['name']]['host_data_ip'] = host_data_ip
-            self.host_data[host['name']]['host_control_ip'] = host_control_ip
-            roles = host["roles"]
-            for role in roles:
-                if role['type'] == 'openstack':
-                    if self.auth_ip:
-                        if self.ha_setup == 'True':
-                            self.openstack_ip = host_ip
-                        else:
-                            self.openstack_ip = self.auth_ip
-                    else:
-                        self.openstack_ip = host_ip
-                        self.auth_ip = host_ip
-                if role['type'] == 'cfgm':
-                    self.cfgm_ip = host_ip
-                    self.cfgm_ips.append(host_ip)
-                    self.cfgm_control_ips.append(host_control_ip)
-                    self.cfgm_control_ip = host_control_ip
-                    self.cfgm_names.append(host['name'])
-                    self.ds_server_ip.append(host_ip)
-                    self.ds_server_name.append(host['name'])
-                    self.masterhost = self.cfgm_ip
-                    self.hostname = host['name']
-                if role['type'] == 'compute':
-                    self.compute_ips.append(host_ip)
-                    self.compute_names.append(host['name'])
-                    self.compute_info[host['name']] = host_ip
-                    self.compute_control_ips.append(host_control_ip)
-                if role['type'] == 'bgp':
-
-                    self.bgp_ips.append(host_ip)
-                    self.bgp_control_ips.append(host_control_ip)
-                    self.bgp_names.append(host['name'])
-#                if role['type'] == 'collector' :
-#                    self.collector_ip= host_ip
-                if role['type'] == 'webui':
-                    self.webui_ip = host_ip
-                    self.webui_ips.append(host_ip)
-                if role['type'] == 'collector':
-                    self.collector_ip = host_ip
-                    self.collector_ips.append(host_ip)
-                    self.collector_control_ips.append(host_control_ip)
-                    self.collector_names.append(host['name'])
-                if role['type'] == 'database':
-                    self.database_ip = host_ip
-                    self.database_ips.append(host_ip)
-                    self.database_names.append(host['name'])
-                    self.database_control_ips.append(host_control_ip)
-            # end for
-        # end for
-        if self.ha_setup == 'True':
-            #            vip_keystone_ip = json_data['vip']['keystone']
-            #            vip_contrail_ip = json_data['vip']['contrail']
-            #            self.vip['keystone'] = vip_keystone_ip
-            #            self.vip['contrail'] = vip_contrail_ip
-            self.vip['keystone'] = self.auth_ip
-            self.vip['contrail'] = self.auth_ip
-            self.update_etc_hosts_for_vip()
-
-        if 'vgw' in json_data:
-            self.vgw_data = json_data['vgw']
-
-        if 'hosts_ipmi' in json_data:
-            self.hosts_ipmi = json_data['hosts_ipmi']
-
-        json_data = ast.literal_eval(prov_data)
-
-        return json.loads(prov_data)
-    # end _read_prov_file
-
-    def get_host_ip(self, name):
-        ip = self.host_data[name]['host_ip']
-        if ip in self.ha_tmp_list:
-            ip = self.vip['contrail']
-        return ip
-
-    def update_etc_hosts_for_vip(self):
-        contrail_vip_name = "contrail-vip"
-        for host in self.host_ips:
-            cmd = 'if ! grep -Rq "contrail-vip" /etc/hosts; then echo "%s  %s" >> /etc/hosts; fi' % (
-                self.vip['contrail'], contrail_vip_name)
-            self.run_cmd_on_server(host, cmd)
-            if self.vip['contrail'] != self.vip['keystone']:
-                keystone_vip_name = "keystone-vip"
-                cmd = 'echo "%s %s" >> /etc/hosts' % (
-                    self.vip['keystone'], keystone_vip_name)
-                self.run_cmd_on_server(host, cmd)
-
-    def _create_prov_data(self):
-        ''' Creates json data for a single node only.
-
-        '''
-        single_node = self.single_node
-        self.cfgm_ip = single_node
-        self.cfgm_ips = [single_node]
-        self.bgp_ips = [single_node]
-        self.compute_ips = [single_node]
-        self.host_ips = [single_node]
-        self.collector_ip = single_node
-        self.collector_ips = [single_node]
-        self.database_ip = single_node
-        self.database_ips = [single_node]
-        self.webui_ip = single_node
-        self.openstack_ip = single_node
-        json_data = {}
-        self.host_data = {}
-        hostname = socket.gethostbyaddr(single_node)[0]
-        self.hostname = hostname
-        self.compute_names = [self.hostname]
-        self.compute_info = {hostname: single_node}
-        json_data['hosts'] = [{
-            'ip': single_node,
-            'name': hostname,
-            'username': self.username,
-            'password': self.password,
-            'roles': [
-                {"params": {"collector": hostname, "cfgm": hostname},
-                 "type": "bgp"},
-
-                {"params": {"bgp": [hostname, hostname], "cfgm":
-                            hostname, "collector": hostname}, "type": "compute"},
-                {"params": {"collector": hostname}, "type": "cfgm"},
-                {"params": {"cfgm": hostname}, "type": "webui"},
-                {"type": "collector"}
-            ]
-        }]
-        self.host_data[single_node] = json_data['hosts'][0]
-        return json_data
-    # end _create_prov_data
-
-    def get_pwd(self):
-        if 'EMAIL_PWD' in os.environ:
-            self.p = os.environ.get('EMAIL_PWD')
-        else:
-            self.p = getpass.getpass(
-                prompt='Enter password for  ' + self.mailSender + ' : ')
-    # end get_pwd
-
     def verify_state(self):
-        result = True
-        for host in self.host_ips:
-            username = self.host_data[host]['username']
-            password = self.host_data[host]['password']
-            if host in self.compute_ips:
-                for service in self.compute_services:
-                    result = result and self.verify_service_state(
-                        host,
-                        service,
-                        username,
-                        password)
-            if host in self.bgp_ips:
-                for service in self.control_services:
-                    result = result and self.verify_service_state(
-                        host,
-                        service,
-                        username,
-                        password)
-            if host in self.cfgm_ips:
-                for service in self.cfgm_services:
-                    result = result and self.verify_service_state(
-                        host,
-                        service,
-                        username,
-                        password)
-            if host in self.collector_ips:
-                for service in self.collector_services:
-                    result = result and self.verify_service_state(
-                        host,
-                        service,
-                        username,
-                        password)
-            if host == self.webui_ip:
-                for service in self.webui_services:
-                    result = result and self.verify_service_state(
-                        host,
-                        service,
-                        username,
-                        password)
-            if host == self.openstack_ip:
-                for service in self.openstack_services:
-                    result = result and self.verify_service_state(
-                        host,
-                        service,
-                        username,
-                        password)
+        result, failed_services = ContrailStatusChecker(self
+            ).wait_till_contrail_cluster_stable(tries=1)
+        if not result and failed_services:
+            self.logger.info("Failed services are : %s" % (failed_services))
         return result
     # end verify_state
 
-    def get_service_status(self, m, service):
-        Service = namedtuple('Service', 'name state')
-        for keys, values in m.items():
-            values = values[0].rstrip().split()
-            if service in str(values):
-                cls = Service(values[0], values[1])
-                self.logger.info("\n%s:%s" % (cls.name, cls.state))
-                return cls
-        return None
+    def verify_service_state(self, host, service=None, role=None):
+        return ContrailStatusChecker(self).wait_till_contrail_cluster_stable(
+            host, role, service, tries=6, delay=5)
 
-    def verify_service_state(self, host, service, username, password):
-        m = None
-        cls = None
-        try:
-            m = self.get_contrail_status(host)
-            cls = self.get_service_status(m, service)
-            if (cls.state in self.correct_states):
-                return True
-        except Exception as e:
-            self.logger.exception("Got exception as %s" % (e))
-            self.logger.exception(
-                "Service %s not in correct state - its in %s state" %
-                (cls.name, cls.state))
-            return False
-        self.logger.exception(
-            "Service %s not in correct state - its in %s state" %
-            (cls.name, cls.state))
-        return False
-
-    def verify_control_connection(self, connections):
-        self.connections = connections
-        self.discovery = self.connections.ds_verification_obj
-        return self.discovery.verify_bgp_connection()
-    # end verify_control_connection
+    def verify_service_down(self, host, service=None, role=None):
+        return ContrailStatusChecker(self).wait_till_service_down(
+            host, role, service, tries=6, delay=5)
 
     def build_compute_to_control_xmpp_connection_dict(self, connections):
-        self.connections = connections
         agent_to_control_dct = {}
         for ip in self.compute_ips:
             actual_bgp_peer = []
-            inspect_h = self.connections.agent_inspect[ip]
+            inspect_h = connections.agent_inspect[ip]
             agent_xmpp_status = inspect_h.get_vna_xmpp_connection_status()
             for i in xrange(len(agent_xmpp_status)):
                 actual_bgp_peer.append(agent_xmpp_status[i]['controller_ip'])
@@ -647,103 +1406,213 @@ class ContrailTestInit(fixtures.Fixture):
     # end reboot
 
     @retry(delay=10, tries=10)
-    def confirm_service_restart(self, service_name, host):
-        cmd = 'contrail-status | grep %s | grep " active "' % (service_name)
+    def confirm_service_active(self, service_name, host, container=None,
+            certs_dict=None):
+        '''
+        In some cases service certificates can be different than client(test
+        cases in this case). so we need service certs to be used in contrail-status,
+        which can be passed as certs_dict.
+        certs_dict = {'key':value, 'cert':value, 'ca':value}
+        '''
+        raise Exception('contrail-status not supported')
+        #ToDo - msenthil - need to revisit once contrail-status command is available
+        if container:
+            if not self.introspect_insecure:
+                if certs_dict:
+                    key = certs_dict['key']
+                    cert = certs_dict['cert']
+                    ca = certs_dict['ca']
+                else:
+                    key = self.introspect_keyfile
+                    cert = self.introspect_certfile
+                    ca = self.introspect_cafile
+                ssl_args = ' -k %s -c %s -a %s' % (key, cert, ca)
+            else:
+                ssl_args = None
+        
+            status = " active"
+            cmd = 'contrail-status'
+            if ssl_args:
+                cmd = cmd + ssl_args
+            cmd = '%s | grep %s' % (cmd, service_name)
+        else:
+            cmd = "systemctl status  %s | grep Active| awk '{print $2}'" \
+                    % service_name
+        self.logger.debug('Running command "%s" on host "%s" and container "%s" '
+                         'for service "%s"' %
+                         (cmd, self.host_data[host]['name'], container, service_name))
         output = self.run_cmd_on_server(
             host, cmd, self.host_data[host]['username'],
-            self.host_data[host]['password'])
-        if output is not None:
+            self.host_data[host]['password'],
+            container=container)
+        if container and output and (service_name in output) and (status in output):
+            return True
+        elif not container and output=="active":
             return True
         else:
             return False
-    # end confirm_service_restart
+    # end confirm_service_active
 
-    def restart_service(
-            self,
-            service_name,
-            host_ips=[],
-            contrail_service=True):
-        result = True
-        if len(host_ips) == 0:
-            host_ips = self.host_ips
-        for host in host_ips:
+    def get_analytics_aaa_mode(self, host=None):
+        host = host or self.collector_ip
+        cmd = 'crudini --get /etc/contrail/contrail-analytics-api.conf DEFAULTS aaa_mode'
+        aaa_mode = self.run_cmd_on_server(host, cmd, container='analytics-api')
+        return aaa_mode or 'cloud-admin'
+
+    # A very ugly hack until we modify all the tests to use microservice env
+    def get_container_for_service(self, service):
+        dct = {'contrail-api': 'api-server',
+               'contrail-schema': 'schema',
+               'contrail-svc-monitor': 'svc-monitor',
+               'contrail-config-nodemgr': 'config-nodemgr',
+               'contrail-device-manager': 'device-manager',
+               'contrail-webui': 'webui',
+               'contrail-webui-middleware': 'webui-middleware',
+               'contrail-collector': 'collector',
+               'contrail-alarm-gen': 'alarm-gen',
+               'contrail-analytics-api': 'analytics-api',
+               'contrail-query-engine': 'query-engine',
+               'contrail-analytics-nodemgr': 'analytics-nodemgr',
+               'contrail-snmp-collector': 'snmp-collector',
+               'contrail-topology': 'topology',
+               'contrail-database': 'analytics-cassandra',
+               'contrail-database-nodemgr': 'analyticsdb-nodemgr',
+               'kafka': 'analytics-kafka',
+               'contrail-vrouter-agent': 'agent',
+               'contrail-vrouter-nodemgr': 'vrouter-nodemgr',
+               'contrail-control': 'control',
+               'contrail-control-nodemgr': 'control-nodemgr',
+               'contrail-dns': 'dns',
+               'contrail-named': 'named',
+               'contrail-kube-manager': 'contrail-kube-manager',
+              }
+        return dct.get(service)
+    
+    def get_container_name(self, host, service):
+        '''
+           Provided the contrail service and hostname/hostip return container name
+           host - hostname or hostip
+           service - contrail service (eg: agent)
+        '''
+        return self.host_data[host].get('containers', {}).get(service)
+
+    def is_container_up(self, host, service):
+        container = self.host_data[host]['containers'][service]
+        cmd = "docker ps -f NAME=%s -f status=running 2>/dev/null"%container
+        for i in range(3):
+            output = self.run_cmd_on_server(host, cmd, as_sudo=True)
+            if not output or 'Up' not in output:
+                self.logger.warn('Container %s is not up on host %s'%(container, host))
+                return False
+            time.sleep(3)
+        self.logger.debug('Container %s is up on host %s'%(container, host))
+        return True
+
+    @property
+    def is_microservices_env(self):
+        if 'schema' in self.host_data[self.cfgm_ip]['containers'] and \
+            'schema' in self.host_data[self.cfgm_ip]['containers']['schema']:
+            return True
+        return False
+
+    def _action_on_container(self, hosts, event, container, services=None, verify_service=True, timeout=60):
+        containers = set()
+        for service in services or []:
+            cntr = self.get_container_for_service(service)
+            if cntr:
+                containers.add(cntr)
+        if containers and container not in ['analytics', 'analyticsdb', 'controller']:
+            containers.add(container)
+        for host in hosts or self.host_ips:
             username = self.host_data[host]['username']
             password = self.host_data[host]['password']
-            self.logger.info('Restarting %s.service in %s' %
-                             (service_name, self.host_data[host]['name']))
-            if contrail_service:
-                issue_cmd = 'service %s restart' % (service_name)
-            else:
-                issue_cmd = 'service %s restart' % (service_name)
-            self.run_cmd_on_server(
-                host, issue_cmd, username, password, pty=False)
-            assert self.confirm_service_restart(service_name, host), \
-                "Service Restart failed for %s" % (service_name)
+            for container in containers:
+                cntr = self.get_container_name(host, container)
+                if not cntr:
+                    self.logger.info('Unable to find %s container on %s'%(container, host))
+                    continue
+                timeout = '' if event == 'start' else '-t 60'
+                issue_cmd = 'docker %s %s %s' % (event, cntr, timeout)
+                self.logger.info('Running %s on %s' %
+                                 (issue_cmd, self.host_data[host]['name']))
+                self.run_cmd_on_server(host, issue_cmd, username, password, pty=True, as_sudo=True)
+                if verify_service:
+                    container_status = self.is_container_up(host, container)
+                    assert container_status if 'start' in event else not container_status
+                    service_status = self.verify_service_state(host, container)[0]
+                    assert service_status if 'start' in event else not service_status
+    #end _action_on_container
+
+    def restart_container(self, host_ips=None, container=None, verify_service=True):
+        self._action_on_container(host_ips, 'restart', container, verify_service=verify_service)
     # end restart_service
 
-    def stop_service(self, service_name, host_ips=[], contrail_service=True):
-        result = True
-        if len(host_ips) == 0:
-            host_ips = self.host_ips
-        for host in host_ips:
-            username = self.host_data[host]['username']
-            password = self.host_data[host]['password']
-            self.logger.info('Stoping %s.service in %s' %
-                             (service_name, self.host_data[host]['name']))
-            if contrail_service:
-                issue_cmd = 'service %s stop' % (service_name)
-            else:
-                issue_cmd = 'service %s stop' % (service_name)
-            self.run_cmd_on_server(
-                host, issue_cmd, username, password, pty=False)
+    def stop_container(self, host_ips=None, container=None, verify_service=True):
+        self._action_on_container(host_ips, 'stop', container, verify_service=verify_service)
     # end stop_service
 
-    def start_service(self, service_name, host_ips=[], contrail_service=True):
-        result = True
-        if len(host_ips) == 0:
-            host_ips = self.host_ips
-        for host in host_ips:
-            username = self.host_data[host]['username']
-            password = self.host_data[host]['password']
-            self.logger.info('Starting %s.service in %s' %
-                             (service_name, self.host_data[host]['name']))
-            if contrail_service:
-                issue_cmd = 'service %s start' % (service_name)
-            else:
-                issue_cmd = 'service %s start' % (service_name)
-            self.run_cmd_on_server(
-                host, issue_cmd, username, password, pty=False)
+    def start_container(self, host_ips=None, container=None, verify_service=True):
+        self._action_on_container(host_ips, 'start', container, verify_service=verify_service)
     # end start_service
 
-    def _compare_service_state(
-        self, host, service, state, state_val, active_str1, active_str1_val,
-            active_str2, active_str2_val):
-        result = False
-        if 'xen' in self.os_type[host] or 'centos' in self.os_type[host]:
-            if active_str2 != active_str2_val:
-                result = False
-                self.logger.warn(
-                    'On host %s,Service %s state is (%s) .. NOT Expected !!' %
-                    (host, service, active_str2))
-        elif 'fc' in self.os_type[host]:
-            if (state,
-                active_str1,
-                active_str2) != (state_val,
-                                 active_str1_val,
-                                 active_str2_val):
-                result = False
-                self.logger.warn(
-                    'On host %s,Service %s states are %s, %s, %s .. NOT Expected !!' %
-                    (host, service, state, active_str1, active_str2))
-        return result
-    # end _compare_service_state
+    def get_contrail_services(self, role=None, service_name=None):
+        ''' get contrail services of a role or
+            if supervisor services return all services of the role
+            Note: role takes precedence over service_name
+        '''
+        service_name = None if role else service_name
+        if role == 'config' or 'supervisor-config' == service_name:
+            return self.cfgm_services
+        if role == 'control' or 'supervisor-control' == service_name:
+            return self.control_services
+        if role == 'compute' or 'supervisor-vrouter' == service_name:
+            return self.compute_services
+        if role == 'webui' or 'supervisor-webui' == service_name:
+            return self.webui_services
+        if role == 'database' or 'supervisor-database' == service_name:
+            return self.database_services
+        if role == 'analytics' or 'supervisor-analytics' == service_name:
+            return self.collector_services
+        return [service_name] if service_name else []
 
-    def get_contrail_status(self, server_ip, username='root',
-                            password='contrail123'):
-        cache = self.run_cmd_on_server(server_ip, 'contrail-status')
-        m = dict([(n, tuple(l.split(';')))
-                  for n, l in enumerate(cache.split('\n'))])
-        return m
+    def _action_on_service(self, service_name, event, host_ips=None, container=None,
+            verify_service=True):
+        services = self.get_contrail_services(service_name=service_name)
+        if self.is_microservices_env and container:
+            return self._action_on_container(host_ips, event, container, services=services,
+                                             verify_service=verify_service)
+        _container = container
+        for service in services:
+            for host in host_ips or self.host_ips:
+                username = self.host_data[host]['username']
+                password = self.host_data[host]['password']
+                issue_cmd = 'service %s %s' % (service, event)
+                self.logger.info('%s %s.service on %s - %s %s' %
+                                 (event, service, self.host_data[host]['name'],
+                                  issue_cmd, 'on '+container if container else 'host'))
+                self.run_cmd_on_server(
+                    host, issue_cmd, username, password, pty=True, container=container)
+                if verify_service and (event == 'restart'):
+                    assert self.confirm_service_active(service_name,
+                               host, container=container), \
+                               "Service Restart failed for %s" % (service_name)
+    #end _action_on_service
+
+    def restart_service(self, service_name, host_ips=None,
+                        container=None, verify_service=True):
+        self._action_on_service(service_name, 'restart', host_ips, container,
+            verify_service=verify_service)
+    # end restart_service
+
+    def stop_service(self, service_name, host_ips=None,
+                     container=None):
+        self._action_on_service(service_name, 'stop', host_ips, container)
+    # end stop_service
+
+    def start_service(self, service_name, host_ips=None,
+                      container=None):
+        self._action_on_service(service_name, 'start', host_ips, container)
+    # end start_service
 
     def run_provision_control(
             self,
@@ -757,7 +1626,7 @@ class ContrailTestInit(fixtures.Fixture):
         bgp_ips = set(self.bgp_ips)
         for host in bgp_ips:
             host_name = self.host_data[host]['name']
-            issue_cmd = "python /opt/contrail/utils/provision_control.py \
+            issue_cmd = "python /usr/share/contrail-utils/provision_control.py \
 			--host_name '%s' --host_ip '%s' --router_asn '%s' \
 			--api_server_ip '%s' --api_server_port '%s' --oper '%s'" % (host_name,
                                                                host,
@@ -767,33 +1636,13 @@ class ContrailTestInit(fixtures.Fixture):
                                                                oper)
 
             output = self.run_cmd_on_server(
-                self.cfgm_ip, issue_cmd, username, password)
+                self.cfgm_ip, issue_cmd, username, password,
+                container='controller')
             if output.return_code != 0:
                 self.logger.exception('Fail to execute provision_control.py')
                 return output
 
     # end run_provision_control
-
-    def get_mysql_token(self):
-        if self.orchestrator == 'vcenter':
-            return None
-        if self.devstack:
-            return 'contrail123'
-        username = self.host_data[self.openstack_ip]['username']
-        password = self.host_data[self.openstack_ip]['password']
-        cmd = 'cat /etc/contrail/mysql.token'
-        with hide('everything'):
-            with settings(
-                    host_string='%s@%s' % (username, self.openstack_ip),
-                    password=password, warn_only=True, abort_on_prompts=False):
-                if not exists('/etc/contrail/mysql.token'):
-                    return None
-        return self.run_cmd_on_server(
-            self.openstack_ip,
-            cmd,
-            username,
-            password)
-    # end get_mysql_token
 
     def run_provision_mx(
             self,
@@ -806,14 +1655,15 @@ class ContrailTestInit(fixtures.Fixture):
 
         username = self.host_data[self.cfgm_ip]['username']
         password = self.host_data[self.cfgm_ip]['password']
-        issue_cmd = "python /opt/contrail/utils/provision_mx.py \
+        issue_cmd = "python /usr/share/contrail-utils/provision_mx.py \
 			--api_server_ip '%s' --api_server_port '%s' \
 			--router_name '%s' --router_ip '%s'  \
 			--router_asn '%s' --oper '%s'" % (
             api_server_ip, api_server_port,
             router_name, router_ip, router_asn, oper)
         output = self.run_cmd_on_server(
-            self.cfgm_ip, issue_cmd, username, password)
+            self.cfgm_ip, issue_cmd, username, password,
+            container='controller')
         if output.return_code != 0:
             self.logger.exception('Fail to execute provision_mx.py')
             return output
@@ -829,14 +1679,15 @@ class ContrailTestInit(fixtures.Fixture):
 
         username = self.host_data[self.cfgm_ip]['username']
         password = self.host_data[self.cfgm_ip]['password']
-        issue_cmd = "python /opt/contrail/utils/add_route_target.py \
+        issue_cmd = "python /usr/share/contrail-utils/add_route_target.py \
                     --routing_instance_name '%s' --route_target_number '%s' \
                     --router_asn '%s' --api_server_ip '%s' --api_server_port '%s'" % (
-                    routing_instance_name, route_target_number, 
-                    router_asn, api_server_ip, api_server_port)
+                    routing_instance_name, route_target_number,
+            router_asn, api_server_ip, api_server_port)
 
         output = self.run_cmd_on_server(
-            self.cfgm_ip, issue_cmd, username, password)
+            self.cfgm_ip, issue_cmd, username, password,
+            container='controller')
         if output.return_code != 0:
             self.logger.exception('Fail to execute add_route_target.py')
             return output
@@ -915,138 +1766,76 @@ class ContrailTestInit(fixtures.Fixture):
                 return output
     # end unconfigure_mx
 
-    def run_cmd_on_server(self, server_ip, issue_cmd, username=None,
-                          password=None, pty=True):
-        self.logger.debug("COMMAND: (%s)" % issue_cmd)
-        if server_ip in self.host_data.keys():
-            if not username:
-                username = self.host_data[server_ip]['username']
-            if not password:
-                password = self.host_data[server_ip]['password']
-        with hide('everything'):
-            with settings(
-                host_string='%s@%s' % (username, server_ip), password=password,
-                    warn_only=True, abort_on_prompts=False):
-                output = run('%s' % (issue_cmd), pty=pty)
-                self.logger.debug(output)
-                return output
-    # end run_cmd_on_server
-
-    def cleanUp(self):
-        super(ContrailTestInit, self).cleanUp()
-
-    def log_any_issues(self, test_result):
-        ''' Log any issues as seen in test_result (TestResult) object
-        '''
-        self.logger.info('\n TEST ERRORS AND FAILURES : \n')
-        if sys.version_info >= (2, 7):
-            self.logger.info(str(test_result.printErrors()))
-            print test_result.printErrors()
-        for failure_tuple in test_result.failures:
-            for item in failure_tuple:
-                self.logger.info(item)
-                print item
-    # end log_any_issues
-
-    def get_node_name(self, ip):
-        return self.host_data[ip]['name']
-
-    def _get_phy_topology_detail(self):
-        detail = ''
-        compute_nodes = [self.get_node_name(x) for x in self.compute_ips]
-        bgp_nodes = [self.get_node_name(x) for x in self.bgp_ips]
-        collector_nodes = [self.get_node_name(x) for x in self.collector_ips]
-        cfgm_nodes = [self.get_node_name(x) for x in self.cfgm_ips]
-        webui_node = self.get_node_name(self.webui_ip)
-        openstack_node = self.get_node_name(self.openstack_ip)
-        database_nodes = [self.get_node_name(x) for x in self.database_ips]
-
-        newline = '<br/>'
-        detail = newline
-        detail += 'Config Nodes : %s %s' % (cfgm_nodes, newline)
-        detail += 'Control Nodes : %s %s' % (bgp_nodes, newline)
-        detail += 'Compute Nodes : %s %s' % (compute_nodes, newline)
-        detail += 'Openstack Node : %s %s' % (openstack_node, newline)
-        detail += 'WebUI Node : %s %s' % (webui_node, newline)
-        detail += 'Analytics Nodes : %s %s' % (collector_nodes, newline)
-        return detail
-    # end _get_phy_topology_detail
-
-    def write_report_details(self):
-
-        phy_topology = self._get_phy_topology_detail()
-
-        details_h = open(self.report_details_file, 'w')
-        config = ConfigParser.ConfigParser()
-        config.add_section('Test')
-        config.set('Test', 'Build', self.build_id)
-        config.set('Test', 'timestamp', self.ts)
-        config.set('Test', 'Report', self.html_log_link)
-        config.set('Test', 'LogsLocation', self.log_link)
-        config.set('Test', 'Topology', phy_topology)
-        # config.write(details_h)
-
-        log_location = ''
-        if self.jenkins_trigger:
-            log_location = "nodeb10.englab.juniper.net:/cs-shared/test_runs" \
-                "/%s/%s" % (self.host_data[self.cfgm_ips[0]]['name'], self.ts)
-            config.set('Test', 'CoreLocation', log_location)
-
-        config.write(details_h)
-        details_h.close()
-    # end
-
-    def check_juniper_intranet(self):
-        cmd = 'ping -c 5 ntp.juniper.net'
-        try:
-            # Use http based check if proxy is set.
-            if self.http_proxy:
-                cmd = "http_proxy=%s wget -O /dev/null --timeout=3 --tries=2 ntp.juniper.net" % self.http_proxy
-            subprocess.check_output(cmd, stderr=subprocess.STDOUT, shell=True)
-            self.is_juniper_intranet = True
-            self.logger.debug('Detected to be inside Juniper Network')
-        except subprocess.CalledProcessError:
-            self.is_juniper_intranet = False
-            self.logger.debug('Detected to be outside of Juniper Network')
-    # end check_juniper_intranet
-
-    def get_build_id(self):
-        if self.build_id:
-            return self.build_id
-        return self.get_contrail_version('contrail-install-packages')
-
-    def copy_fabfile_to_agents(self):
+    def copy_file_to_server(self, ip, src, dstdir, dst, force=False,
+                            container=None):
         host = {}
-        for ip in self.compute_ips:
-            host['ip'] = ip
-            host['username'] = self.host_data[ip]['username']
-            host['password'] = self.host_data[ip]['password']
-            copy_file_to_server(host, 'tcutils/fabfile.py', '~/', 'fabfile.py')
-    # end copy_fabfile_to_agents
+        host['ip'] = ip
+        host['username'] = self.host_data[ip]['username']
+        host['password'] = self.host_data[ip]['password']
+        if not self.host_data[ip].get('containers', {}).get(container):
+            container = None
+            self.logger.debug('Container %s not in host %s, copying to '
+                ' host itself' % (container, ip))
+        copy_file_to_server(host, src, dstdir, dst, force, container=container)
 
-    def get_openstack_release(self):
-        with settings(
-            host_string='%s@%s' % (
-                self.username, self.cfgm_ips[0]),
-                password=self.password, warn_only=True, abort_on_prompts=False, debug=True):
-            ver = run('contrail-version')
-            pkg = re.search(r'contrail-install-packages(.*)~(\w+)(.*)', ver)
-            os_release = pkg.group(2)
-            self.logger.info("%s" % os_release)
-            return os_release
-    # end get_openstack_release
+    def copy_file_from_server(self, ip, src_file_path, dest_folder,
+            container=None):
+        host = {}
+        host['ip'] = ip
+        host['username'] = self.host_data[ip]['username']
+        host['password'] = self.host_data[ip]['password']
+        if not self.host_data[ip].get('containers', {}).get(container):
+            container = None
+            self.logger.debug('Container %s not in host %s, copying from '
+                ' host itself' % (container, ip))
+        copy_file_from_server(host, src_file_path, dest_folder,
+            container=container)
+    # end copy_file_from_server
 
-    def get_contrail_version(self, package):
-        if self.contrail_version:
-            return self.contrail_version
-        build_id_cmd = 'source /opt/contrail/contrail_packages/VERSION'
-        if 'ubuntu' in self.os_type[self.cfgm_ips[0]]:
-            release_cmd = 'release=`apt-cache show contrail-install-packages | grep Version | grep -o "[0-9\.]*" | head -1`'
+    def get_ci_image(self, image_name='cirros'):
+        '''
+        if ci_image env variable is not defined, returns None
+        If ci_image is defined:
+            if image_name is in CI_IMAGES list
+                Returns image_name
+            else
+                Returns 'cirros' image name
+        '''
+        if not os.environ.has_key('ci_image'):
+            return None
+        if image_name in CI_IMAGES:
+            return image_name
         else:
-            release_cmd = 'release=`rpm -qi contrail-install-packages | grep Version | awk \'{print $3}\'`'
-        self.contrail_version = self.run_cmd_on_server(
-            self.cfgm_ips[0], "%s ; %s; echo ${release}-${BUILDID}" %
-            (release_cmd, build_id_cmd))
-        self.build_id = self.contrail_version
-        return self.contrail_version
-    # end get_contrail_version
+            return DEFAULT_CI_IMAGE
+    # end get_ci_image
+
+    def get_linux_distro(self, host_ip, container=None):
+        '''
+        Figure out the os type and release on nodes or container in the cluster
+        '''
+        output = None
+        cmd = 'python -c "from platform import linux_distribution; print linux_distribution()" '
+        output = self.run_cmd_on_server(host_ip,
+                        cmd, container=container)
+        return eval(output)
+    #get_linux_distro
+
+def _parse_args( args_str):
+    parser = argparse.ArgumentParser()
+    args, remaining_argv = parser.parse_known_args(args_str.split())
+    parser.add_argument(
+                "--conf_file", nargs='?', default="check_string_for_empty",help="pass sanity_params.ini",required=True)
+    args = parser.parse_args(remaining_argv)
+    return args
+
+
+def main(args_str = None):
+    if not args_str:
+       script_args = ' '.join(sys.argv[1:])
+    script_args = _parse_args(script_args)
+    inputs = ContrailTestInit(input_file=script_args.conf_file)
+
+if __name__ == '__main__':
+    main()
+
+

@@ -1,0 +1,2 @@
+backports.ssl-match-hostname==3.5.0.1
+kubernetes==5.0.0b1

@@ -1,7 +1,5 @@
 import os
 import copy
-from common.openstack_libs import nova_client as mynovaclient
-from common.openstack_libs import nova_exception as novaException
 import fixtures
 import testtools
 import topo_steps
@@ -28,7 +26,7 @@ except ImportError:
 class sdnTopoSetupFixture(fixtures.Fixture):
 
     def __init__(self, connections, topo):
-        self.ini_file = os.environ.get('TEST_CONFIG_FILE')
+        self.input_file = os.environ.get('TEST_CONFIG_FILE')
         self.connections = connections
         self.inputs = self.connections.inputs
         self.quantum_h = self.connections.quantum_h
@@ -48,22 +46,22 @@ class sdnTopoSetupFixture(fixtures.Fixture):
     # end setUp
 
     def topo_setup(self, config_option='openstack', skip_verify='no', flavor='contrail_flavor_small', vms_on_single_compute=False, VmToNodeMapping=None):
-        '''Take topology to be configured as input and return received & configured topology -collection 
-        of dictionaries. we return received topology as some data is updated and is required for 
+        '''Take topology to be configured as input and return received & configured topology -collection
+        of dictionaries. we return received topology as some data is updated and is required for
         reference.
         Bring up with 2G RAM to support multiple traffic streams..For scaling tests, min of 8192 is recommended.
         Available config_option for SDN topo setup
-        1. 'openstack': Configures all sdn entities like VN,policy etc using Openstack API 
+        1. 'openstack': Configures all sdn entities like VN,policy etc using Openstack API
            a. Project: Keystone
            b. Policy:  Quantum
            c. IPAM:    Contrail API
            d. VN:      Quantum
            e. VM:      Nova
-        2. 'contrail': Configures all sdn entities like VN,policy etc using Contrail API 
+        2. 'contrail': Configures all sdn entities like VN,policy etc using Contrail API
            a. Project: Keystone
-           b. Policy:  Contrail API 
+           b. Policy:  Contrail API
            c. IPAM:    Contrail API
-           d. VN:      Contrail API 
+           d. VN:      Contrail API
            e. VM:      Nova
         '''
         config_option = 'contrail' if self.inputs.orchestrator == 'vcenter' else config_option
@@ -82,7 +80,8 @@ class sdnTopoSetupFixture(fixtures.Fixture):
         topo_helper_obj = topology_helper(self.topo)
         self.topo.vmc_list = topo_helper_obj.get_vmc_list()
         self.topo.policy_vn = topo_helper_obj.get_policy_vn()
-        self.logger.info("Starting setup")
+        self.logger.debug("Starting setup")
+        topo_helper_obj.update_policy_rules_for_v6_test(self.inputs.get_af())
         topo_steps.createUser(self)
         topo_steps.createProject(self)
         topo_steps.createSec_group(self, option=config_option)
@@ -156,6 +155,7 @@ class sdnTopoSetupFixture(fixtures.Fixture):
                                         "',username='" + self.topo.user_of_project[project] +
                                         "',password='" + self.topo.pass_of_project[project] +
                                         "',config_option='" + config_option +
+                                        "',af_test='" + self.inputs.get_af() +
                                         "')")
             except (NameError, AttributeError):
                 topo[project] = eval("topo_obj.build_topo_" + project + "()")

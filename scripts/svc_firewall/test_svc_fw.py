@@ -4,16 +4,18 @@ import unittest
 import fixtures
 import testtools
 from tcutils.wrappers import preposttest_wrapper
+from tcutils.util import skip_because, get_random_name
 from common.ecmp.ecmp_verify import ECMPVerify
 from common.servicechain.firewall.verify import VerifySvcFirewall
-from common.servicechain.config import ConfigSvcChain
-from base import BaseSvc_FwTest
+from common.servicechain.mirror.verify import VerifySvcMirror
+from common.svc_firewall.base import BaseSvc_FwTest
+from netaddr import IPNetwork
 import test
 from common import isolated_creds
 import inspect
 
 
-class TestSvcRegr(BaseSvc_FwTest, VerifySvcFirewall, ConfigSvcChain, ECMPVerify):
+class TestSvcRegr(BaseSvc_FwTest, VerifySvcFirewall, ECMPVerify):
 
     @classmethod
     def setUpClass(cls):
@@ -23,54 +25,68 @@ class TestSvcRegr(BaseSvc_FwTest, VerifySvcFirewall, ConfigSvcChain, ECMPVerify)
         pass
     # end runTest
 
-    @test.attr(type=['sanity', 'quick_sanity'])
+    @test.attr(type=['ci_sanity', 'vcenter'])
     @preposttest_wrapper
     def test_svc_in_network_datapath(self):
-        return self.verify_svc_in_network_datapath()
+        return self.verify_svc_chain(svc_img_name='cirros_in_net', service_mode='in-network',
+                                     create_svms=True)
 
-    @test.attr(type=['sanity', 'quick_sanity'])
-    @preposttest_wrapper
-    def test_svc_monitor_datapath(self):
-        return self.verify_svc_transparent_datapath()
 
     @test.attr(type=['sanity'])
     @preposttest_wrapper
-    def test_svc_transparent_with_3_instance(self):
-        return self.verify_svc_transparent_datapath(si_count=3)
+    @skip_because(feature='trans_svc')
+    def test_svc_v2_transparent_datapath(self):
+        return self.verify_svc_chain(service_mode='transparent',
+                                                    create_svms=True)
 
-    @test.attr(type=['sanity'])
+    @test.attr(type=['sanity','vcenter'])
     @preposttest_wrapper
+    def test_svc_in_net_nat_with_static_routes(self):
+        third_vn = self.create_vn(vn_name=get_random_name('third-vn'))
+        third_vm = self.create_vm(vn_fixture=third_vn,
+                                  vm_name=get_random_name('vm-in-third-vn'))
+        assert third_vm.wait_till_vm_is_active()
+        routes = list()
+        vm_ips = third_vm.get_vm_ips()
+        for vm_ip in vm_ips:
+            routes.append(str(IPNetwork(vm_ip)))
+        sc_info = self.verify_svc_chain(service_mode='in-network-nat',
+                                        create_svms=True,
+                                        static_route={'left': routes})
+        si_fixture = sc_info['si_fixture']
+        right_vn_fixture = sc_info['right_vn_fixture']
+        left_vm_fixture = sc_info['left_vm_fixture']
+        self.add_static_route_in_svm(si_fixture, third_vn, 'eth2')
+        self.setup_policy_between_vns(right_vn_fixture, third_vn)
+        for vm_ip in vm_ips:
+            errmsg = "Ping to third VM %s from Left VM failed" % vm_ip
+            assert left_vm_fixture.ping_with_certainty(vm_ip, count='3'), errmsg
+
+    @preposttest_wrapper
+    @skip_because(address_family='v6')
     def test_svc_in_network_nat_private_to_public(self):
-        if (('MX_GW_TEST' in os.environ) and (os.environ.get('MX_GW_TEST') == '1')):
-            public_vn_fixture = self.public_vn_obj.public_vn_fixture
-            public_vn_subnet = self.public_vn_obj.public_vn_fixture.vn_subnets[
-                0]['cidr']
-            # Since the ping is across projects, enabling allow_all in the SG
-            self.project.set_sec_group_for_allow_all(
-                self.inputs.project_name, 'default')
-            self.verify_svc_in_network_datapath(
-                svc_mode='in-network-nat', vn2_fixture=public_vn_fixture, vn2_subnets=[public_vn_subnet])
-            self.logger.info('Ping to outside world from left VM')
-            svms = self.get_svms_in_si(
-                self.si_fixtures[0], self.inputs.project_name)
-            svm_name = svms[0].name
-            host = self.get_svm_compute(svm_name)
-            tapintf = self.get_svm_tapintf_of_vn(svm_name, self.vn1_fixture)
-            self.start_tcpdump_on_intf(host, tapintf)
-            assert self.vm1_fixture.ping_with_certainty('8.8.8.8', count='10')
-            out = self.stop_tcpdump_on_intf(host, tapintf)
-            print out
-            if '8.8.8.8' in out:
-                self.logger.info('Ping to 8.8.8.8 is going thru %s ' % svm_name)
-            else:
-                result = False
-                assert result, 'Ping to 8.8.8.8 not going thru the SI'
-        else:
+        if  os.environ.get('MX_GW_TEST', 0) != '1':
             self.logger.info(
-                    "MX_GW_TEST is not set")
+                "Skipping Test. Env variable MX_GW_TEST is not set. Skipping the test")
             raise self.skipTest(
-                    "Env variable MX_GW_TEST not set. Skipping the test")
+                "Skipping Test. Env variable MX_GW_TEST is not set. Skipping the test")
+
+        public_vn_fixture = self.public_vn_obj.public_vn_fixture
+        public_vn_subnet = self.public_vn_obj.public_vn_fixture.vn_subnets[
+            0]['cidr']
+        # Since the ping is across projects, enabling allow_all in the SG
+        self.project.set_sec_group_for_allow_all(
+            self.inputs.project_name, 'default')
+        ret_dict = self.verify_svc_chain(service_mode='in-network-nat',
+                                         right_vn_fixture=public_vn_fixture,
+                                         right_vn_subnets=[public_vn_subnet],
+                                         create_svms=True)
+        self.logger.info('Ping to outside world from left VM')
+        si_fixture = ret_dict['si_fixture']
+        left_vm_fixture = ret_dict['left_vm_fixture']
+        assert left_vm_fixture.ping_with_certainty('8.8.8.8', count='10')
         return True
+
 
 class TestSvcRegrFeature(BaseSvc_FwTest, VerifySvcFirewall):
 
@@ -78,48 +94,49 @@ class TestSvcRegrFeature(BaseSvc_FwTest, VerifySvcFirewall):
     def setUpClass(cls):
         super(TestSvcRegrFeature, cls).setUpClass()
 
-    def runTest(self):
-        pass
-    # end runTest
-
     @preposttest_wrapper
     def test_policy_delete_add_transparent_mode(self):
         """Test policy update in transparent mode service chaining."""
-        self.verify_svc_transparent_datapath()
-        return self.verify_policy_delete_add()
+        ret_dict = self.verify_svc_chain(svc_img_name='tiny_trans_fw',
+                                         create_svms=True)
+        self.verify_policy_delete_add(ret_dict)
 
     @preposttest_wrapper
     def test_policy_delete_add_in_network_mode(self):
         """Test policy update in in network mode service chaining."""
-        self.verify_svc_in_network_datapath()
-        return self.verify_policy_delete_add()
+        ret_dict = self.verify_svc_chain(service_mode='in-network', create_svms=True)
+        return self.verify_policy_delete_add(ret_dict)
 
     @preposttest_wrapper
     def test_policy_to_more_vns_transparent_mode(self):
         """Attach the same policy to  one more left and right VN's transparent mode service chaining."""
-        self.verify_svc_transparent_datapath()
-        return self.verify_add_new_vns()
+        ret_dict = self.verify_svc_chain(svc_img_name='tiny_trans_fw',
+                                         create_svms=True)
+        return self.verify_add_new_vns(ret_dict)
 
     @preposttest_wrapper
-    def test_policy_to_more_vms_in_network_mode(self):
+    def test_policy_to_more_vns_in_network_mode(self):
         """Add more VM's to VN's of in network mode service chaining."""
-        self.verify_svc_in_network_datapath()
-        return self.verify_add_new_vms()
+        mode = 'in-network'
+        ret_dict = self.verify_svc_chain(service_mode=mode, create_svms=True)
+        return self.verify_add_new_vms(ret_dict)
 
     @preposttest_wrapper
     def test_policy_port_protocol_change_transparent_mode(self):
         """Change the port and protocol of policy transparent mode service chaining."""
-        self.verify_svc_transparent_datapath()
-        return self.verify_protocol_port_change()
+        ret_dict = self.verify_svc_chain(svc_img_name='tiny_trans_fw',
+                                         create_svms=True)
+        return self.verify_protocol_port_change(ret_dict)
 
     @preposttest_wrapper
     def test_policy_port_protocol_change_in_network_mode(self):
         """Change the port and protocol of policy in network mode service chaining."""
-        self.verify_svc_in_network_datapath()
-        return self.verify_protocol_port_change(mode='in-network')
+        mode = 'in-network'
+        ret_dict = self.verify_svc_chain(service_mode=mode, create_svms=True)
+        return self.verify_protocol_port_change(ret_dict, mode='in-network')
 
 
-class TestSvcRegrwithMirror(BaseSvc_FwTest, VerifySvcFirewall):
+class TestSvcRegrwithMirror(BaseSvc_FwTest, VerifySvcFirewall, VerifySvcMirror):
 
     @classmethod
     def setUpClass(cls):
@@ -132,22 +149,26 @@ class TestSvcRegrwithMirror(BaseSvc_FwTest, VerifySvcFirewall):
     @preposttest_wrapper
     def test_firewall_in_network_with_mirroring_transparent_mode(self):
         """test firewall in in_network with mirroring in transparent mode"""
-        return self.verify_firewall_with_mirroring(firewall_svc_mode='in-network-nat', mirror_svc_mode='transparent')
+        return self.verify_firewall_with_mirroring(
+            firewall_svc_mode='in-network-nat', mirror_svc_mode='transparent')
 
     @preposttest_wrapper
     def test_firewall_transparent_with_mirroring_in_network_mode(self):
         """test firewall in transparent with mirroring in in_network mode"""
-        return self.verify_firewall_with_mirroring(firewall_svc_mode='transparent', mirror_svc_mode='in-network')
+        return self.verify_firewall_with_mirroring(
+            firewall_svc_mode='transparent', mirror_svc_mode='in-network')
 
     @preposttest_wrapper
     def test_firewall_transparent_with_mirroring_in_transparent(self):
         """test firewall in transparent with mirroring in in_network mode"""
-        return self.verify_firewall_with_mirroring(firewall_svc_mode='transparent', mirror_svc_mode='transparent')
+        return self.verify_firewall_with_mirroring(
+            firewall_svc_mode='transparent', mirror_svc_mode='transparent')
 
     @preposttest_wrapper
     def test_firewall_in_network_with_mirroring_in_network(self):
         """test firewall in in-network with mirroring in in_network mode"""
-        return self.verify_firewall_with_mirroring(firewall_svc_mode='in-network-nat', mirror_svc_mode='in-network')
+        return self.verify_firewall_with_mirroring(
+            firewall_svc_mode='in-network-nat', mirror_svc_mode='in-network')
 
 # TODO: Following tests will be valid after the bug#1130 fix
 #      http://10.84.5.133/bugs/show_bug.cgi?id=1130
@@ -160,3 +181,71 @@ class TestSvcRegrwithMirror(BaseSvc_FwTest, VerifySvcFirewall):
 #    def test_svc_span_in_network_mode(self):
 #        """Verify svc span in in-network mode."""
 #        return self.verify_svc_span(in_net=True)
+
+class TestSvcRegrIPv6(TestSvcRegr):
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestSvcRegrIPv6, cls).setUpClass()
+        cls.inputs.set_af('v6')
+
+    def is_test_applicable(self):
+        if not self.connections.orch.is_feature_supported('ipv6'):
+            return(False, 'IPv6 tests not supported in this environment ')
+        return (True, None)
+
+    @preposttest_wrapper
+    def test_svc_in_network_datapath(self):
+        super(TestSvcRegrIPv6,self).test_svc_in_network_datapath()
+
+    @preposttest_wrapper
+    @skip_because(feature='trans_svc')
+    def test_svc_v2_transparent_datapath(self):
+        super(TestSvcRegrIPv6,self).test_svc_v2_transparent_datapath()
+
+    @preposttest_wrapper
+    def test_svc_in_net_nat_with_static_routes(self):
+        super(TestSvcRegrIPv6,self).test_svc_in_net_nat_with_static_routes()
+
+    @preposttest_wrapper
+    @skip_because(address_family='v6')
+    def test_svc_in_network_nat_private_to_public(self):
+        super(TestSvcRegrIPv6,self).test_svc_in_network_nat_private_to_public()
+
+class TestSvcRegrFeatureIPv6(TestSvcRegrFeature):
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestSvcRegrFeatureIPv6, cls).setUpClass()
+        cls.inputs.set_af('v6')
+
+    def is_test_applicable(self):
+        if not self.connections.orch.is_feature_supported('ipv6'):
+            return(False, 'IPv6 tests not supported in this environment ')
+        return (True, None)
+
+class TestSvcRegrwithMirrorIPv6(TestSvcRegrwithMirror):
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestSvcRegrwithMirrorIPv6, cls).setUpClass()
+        cls.inputs.set_af('v6')
+
+    def is_test_applicable(self):
+        if not self.connections.orch.is_feature_supported('ipv6'):
+            return(False, 'IPv6 tests not supported in this environment ')
+        return (True, None)
+
+    @preposttest_wrapper
+    def test_firewall_in_network_with_mirroring_transparent_mode(self):
+        """test firewall in in_network with mirroring in transparent mode"""
+        return self.verify_firewall_with_mirroring(
+            firewall_svc_mode='in-network',
+            mirror_svc_mode='transparent')
+
+    @preposttest_wrapper
+    def test_firewall_in_network_with_mirroring_in_network(self):
+        """test firewall in in-network with mirroring in in_network mode"""
+        return self.verify_firewall_with_mirroring(
+            firewall_svc_mode='in-network',
+            mirror_svc_mode='in-network')

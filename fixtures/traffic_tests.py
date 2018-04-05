@@ -4,7 +4,8 @@ import fixtures
 #from common.contrail_test_init import ContrailTestInit
 from nova_test import *
 from common.connections import ContrailConnections
-sys.path.append(os.path.realpath('tcutils/pkgs/Traffic'))
+trafficdir = os.path.join(os.path.dirname(__file__), '../tcutils/pkgs/Traffic')
+sys.path.append(trafficdir)
 from traffic.core.stream import Stream
 from traffic.core.profile import create, ContinuousProfile, ContinuousSportRange
 from traffic.core.helpers import Host
@@ -64,10 +65,8 @@ class trafficTestFixture(fixtures.Fixture):
         else:
             self.traffic_fip = True
         if not self.traffic_fip:
-            self.tx_vm_node_ip = self.inputs.host_data[
-                self.nova_h.get_nova_host_of_vm(self.tx_vm_fixture.vm_obj)]['host_ip']
-            self.rx_vm_node_ip = self.inputs.host_data[
-                self.nova_h.get_nova_host_of_vm(self.rx_vm_fixture.vm_obj)]['host_ip']
+            self.tx_vm_node_ip = self.tx_vm_fixture.vm_node_ip
+            self.rx_vm_node_ip = self.rx_vm_fixture.vm_node_ip
             self.tx_local_host = Host(
                 self.tx_vm_node_ip,
                 self.inputs.host_data[self.tx_vm_node_ip]['username'],

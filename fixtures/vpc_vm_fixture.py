@@ -76,10 +76,14 @@ class VPCVMFixture(fixtures.Fixture):
     # end setUp
 
     def create_vm(self):
+        zone, node_name = self.nova_h.lb_node_zone()
+        self.image_name = self.nova_h.get_image_name_for_zone(
+                                        image_name=self.image_name,
+                                        zone=zone)
         self.nova_h.get_image(self.image_name)
         self.image_id = self._get_image_id()
-        cmd_str = 'euca-run-instances %s -s %s -k %s' % \
-            (self.image_id, self.subnet_id, self.key)
+        cmd_str = 'euca-run-instances %s -s %s -k %s -z %s' % \
+            (self.image_id, self.subnet_id, self.key, zone)
         if self.instance_type == 'nat':
             cmd_str = 'euca-run-instances %s' % (self.image_id)
         if self.sg_ids:
@@ -225,13 +229,13 @@ class VPCVMFixture(fixtures.Fixture):
             self.vm_id = instance[3].replace('server-', '')
             if 'nat' in self.instance_name:
 #                self.vm_name = instance[3].replace('server-','')
-                self.vm_name = '%s-nat_1' % (self.vpc_id)
+                self.vm_name = get_random_name('%s-nat_1' % (self.vpc_id))
             elif 'server-' + self.vm_id != self.instance_name:
                 self.logger.error('Unexpected instance name : %s' %
                                   (self.instance_name))
             # self.vm_name would have VM name as required by Nova
             else:
-                self.vm_name = 'Server ' + self.vm_id
+                self.vm_name = get_random_name('Server ' + self.vm_id)
         else:
             self.logger.error(
                 'Unable to gather Instance details of the launched VM')

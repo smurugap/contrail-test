@@ -1,2 +1,5 @@
 *.pyc
 .*sw*
+contrail.repo
+Dockerfile.nofromargs
+

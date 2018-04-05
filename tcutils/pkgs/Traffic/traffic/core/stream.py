@@ -1,13 +1,14 @@
 """Module to create traffic stream.
 
 It just parses the arguments given by the user and fills up the approprite
-protocol header. 
+protocol header.
 
 This needs to be extended for new protocol streams with new protocol.
 """
 
 import sys
 import inspect
+import random
 
 try:
     # Running from the source repo "test".
@@ -26,7 +27,7 @@ log = get_logger(name=LOGGER, level=LOG_LEVEL)
 
 
 def help(header="all"):
-    """lists the keywords of fields available in currenlty implemented 
+    """lists the keywords of fields available in currenlty implemented
     protocols.
     This is a helper method to the users to get the list of fields,
     before creating a stream.
@@ -102,6 +103,9 @@ class Stream(object):
             return None
         return ICMPHeader(**self.all_fields).get_header()
 
+    def _igmp_header(self):
+        return IGMPHeader(**self.all_fields).get_header()
+
     def get_l4_proto(self):
         return getattr(self.l3, 'proto', None) or \
                getattr(self.l3, 'nh', None).lower()
@@ -121,6 +125,7 @@ class AnyHeader(object):
         try:
             self.all_fields.update({'sport': int(self.all_fields['sport'])})
             self.all_fields.update({'dport': int(self.all_fields['dport'])})
+            self.all_fields.update({'inter': int(self.all_fields['inter'])})
         except KeyError:
             pass
 
@@ -180,6 +185,7 @@ class ICMPHeader(AnyHeader):
 
     def get_header(self):
         header = self.create_header(self.fields)
+        header['id'] = random.randint(0, 32767)
 
         return Header(header)
 
@@ -219,3 +225,43 @@ class IP6Header(AnyHeader):
             hdr_obj.hlim = hdr_obj.ttl
             del hdr_obj.ttl
         return hdr_obj
+
+class IGMPHeader(AnyHeader):
+
+    def __init__(self, **kwargs):
+        super(IGMPHeader, self).__init__(**kwargs)
+        # Set got from "fields_desc" attribute of protocol headers in scapy.
+        self.fields = ("type", "mrtime", "gaddr")
+
+    def get_header(self):
+        header = self.create_header(self.fields)
+
+        return Header(header)
+
+
+class IGMPv3Header(AnyHeader):
+
+    def __init__(self, **kwargs):
+        super(IGMPv3Header, self).__init__(**kwargs)
+        # Set got from "fields_desc" attribute of protocol headers in scapy.
+        self.fields = ("type")
+
+    def get_header(self):
+        header = self.create_header(self.fields)
+
+        return Header(header)
+
+class IGMPv3mrHeader(AnyHeader):
+
+    def __init__(self, **kwargs):
+        super(IGMPv3mrHeader, self).__init__(**kwargs)
+        # Set got from "fields_desc" attribute of protocol headers in scapy.
+        self.fields = ("numgrp", "records")
+
+    def get_header(self):
+        header = self.create_header(self.fields)
+
+        return Header(header)
+
+
+

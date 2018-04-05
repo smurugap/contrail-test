@@ -54,28 +54,40 @@ class TestRsyslog(BaseRsyslogTest):
         log_mesg = 'This is a test log to check rsyslog provisioning.'
         cmd = cmd + '"' + log_mesg + '"'
         for i in range(3):
-            reply = commands.getoutput(cmd)
+            with settings(host_string='%s@%s' % (self.inputs.host_data[
+                          self.inputs.cfgm_ips[0]]['username'],
+                          self.inputs.cfgm_ips[0]),
+                          password=self.inputs.host_data[
+                          self.inputs.cfgm_ips[0]]['password'],
+                          warn_only=True, abort_on_prompts=False):
+                reply = run('%s' % (cmd), pty=True)
         cmd = "contrail-logs --last 2m --message-type Syslog | "
         cmd = cmd + "grep 'THISISMYTESTLOG'"
         output = self.inputs.run_cmd_on_server(server_ip, cmd,
                              self.inputs.host_data[server_ip]['username'],
-                             self.inputs.host_data[server_ip]['password'])
+                             self.inputs.host_data[server_ip]['password'],
+                             container='analytics-api')
         if log_mesg in output:
             result = True
         return result
     # end send_syslog_and_verify_in_db
 
-    @test.attr(type=['sanity','quick_sanity'])
     @preposttest_wrapper
     def test_rsyslog_sanity_if_provisioned(self):
         """Tests rsyslog connection if provisioned."""
         result = False
 
         # Check rsyslog.conf file for connections.
-        cmd = "grep '@\{1,2\}"
-        cmd = cmd+"[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}"
-        cmd = cmd+":[0-9]\{1,5\}' "+RSYSLOG_CONF_FILE
-        reply = commands.getoutput(cmd)
+        with settings(host_string='%s@%s' % (self.inputs.host_data[
+                          self.inputs.cfgm_ips[0]]['username'],
+                          self.inputs.cfgm_ips[0]),
+                      password=self.inputs.host_data[
+                          self.inputs.cfgm_ips[0]]['password'],
+                      warn_only=True, abort_on_prompts=False):
+            cmd = "grep '@\{1,2\}"
+            cmd = cmd+"[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}"
+            cmd = cmd+":[0-9]\{1,5\}' "+RSYSLOG_CONF_FILE
+            reply = run('%s' % (cmd), pty=True)
 
         # If not present bail out.
         if not reply:
@@ -97,7 +109,8 @@ class TestRsyslog(BaseRsyslogTest):
         cmd = "grep 'syslog_port.=.[0-9]\{1,5\}' "+COLLECTOR_CONF_FILE
         output = self.inputs.run_cmd_on_server(server_ip, cmd,
                                  self.inputs.host_data[server_ip]['username'],
-                                 self.inputs.host_data[server_ip]['password'])
+                                 self.inputs.host_data[server_ip]['password'],
+                                 container='collector')
 
         # If syslog_port not configured and not same as
         # rsyslog.conf bail out.

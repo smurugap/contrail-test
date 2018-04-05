@@ -1,170 +1,52 @@
+import re
 import time
-import test
+import test_v1
+from netaddr import *
+from vnc_api.vnc_api import *
 from common.connections import ContrailConnections
+from common.base import GenericTestBase
 from common import isolated_creds
 from common import create_public_vn
 from vn_test import VNFixture
 from vm_test import VMFixture
 from project_test import ProjectFixture
-from tcutils.util import get_random_name, retry
+from policy_test import PolicyFixture
+from port_fixture import PortFixture
+from interface_route_table_fixture import InterfaceRouteTableFixture
+from tcutils.util import get_random_name, retry, get_random_cidr
 from fabric.context_managers import settings
 from fabric.api import run
 from fabric.operations import get, put
 from tcutils.commands import ssh, execute_cmd, execute_cmd_out
 import ConfigParser
-import re
-
+from tcutils.contrail_status_check import *
+from tcutils.util import is_v6, is_v4
+from contrailapi import ContrailVncApi
+from string import Template
 contrail_api_conf = '/etc/contrail/contrail-api.conf'
 
 
-class BaseNeutronTest(test.BaseTestCase):
+class BaseNeutronTest(GenericTestBase):
 
     @classmethod
     def setUpClass(cls):
+        cls.public_vn_obj = None
         super(BaseNeutronTest, cls).setUpClass()
-        cls.isolated_creds = isolated_creds.IsolatedCreds(
-            cls.__name__,
-            cls.inputs,
-            ini_file=cls.ini_file,
-            logger=cls.logger)
-        cls.admin_connections = cls.isolated_creds.get_admin_connections()
-        cls.isolated_creds.setUp()
-        cls.project = cls.isolated_creds.create_tenant()
-        cls.isolated_creds.create_and_attach_user_to_tenant()
-        cls.inputs = cls.isolated_creds.get_inputs()
-        cls.connections = cls.isolated_creds.get_conections()
-        cls.admin_inputs = cls.isolated_creds.get_admin_inputs()
-        cls.admin_connections = cls.isolated_creds.get_admin_connections()
-        cls.quantum_h = cls.connections.quantum_h
-        cls.nova_h = cls.connections.nova_h
-        cls.vnc_lib = cls.connections.vnc_lib
-        cls.agent_inspect = cls.connections.agent_inspect
-        cls.cn_inspect = cls.connections.cn_inspect
-        cls.analytics_obj = cls.connections.analytics_obj
-        cls.api_s_inspect = cls.connections.api_server_inspect
+        cls.vnc_h = ContrailVncApi(cls.vnc_lib, cls.logger) 
+        if cls.inputs.admin_username:
+            public_creds = cls.admin_isolated_creds
+        else:
+            public_creds = cls.isolated_creds
         cls.public_vn_obj = create_public_vn.PublicVn(
-            cls.__name__,
-            cls.__name__,
-            cls.inputs,
-            ini_file=cls.ini_file,
+            connections=cls.connections,
+            isolated_creds_obj=public_creds,
             logger=cls.logger)
     # end setUpClass
 
     @classmethod
     def tearDownClass(cls):
-        cls.isolated_creds.delete_tenant()
         super(BaseNeutronTest, cls).tearDownClass()
     # end tearDownClass
-
-    def create_vn(self, vn_name, vn_subnets):
-        return self.useFixture(
-            VNFixture(project_name=self.inputs.project_name,
-                      connections=self.connections,
-                      inputs=self.inputs,
-                      vn_name=vn_name,
-                      subnets=vn_subnets))
-
-    def create_vm(self, vn_fixture, vm_name, node_name=None,
-                  flavor='contrail_flavor_small',
-                  image_name='ubuntu-traffic',
-                  port_ids=[]):
-        return self.useFixture(
-            VMFixture(
-                project_name=self.inputs.project_name,
-                connections=self.connections,
-                vn_obj=vn_fixture.obj,
-                vm_name=vm_name,
-                image_name=image_name,
-                flavor=flavor,
-                node_name=node_name,
-                port_ids=port_ids))
-
-    def create_router(self, router_name, tenant_id=None):
-        obj = self.quantum_h.create_router(router_name, tenant_id)
-        if obj:
-            self.addCleanup(self.quantum_h.delete_router, obj['id'])
-        return obj
-
-    def delete_router(self, router_id=None):
-        val = self.quantum_h.delete_router(router_id)
-
-    def create_port(self, net_id, subnet_id=None, ip_address=None,
-                    mac_address=None, no_security_group=False,
-                    security_groups=[], extra_dhcp_opts=None):
-        port_rsp = self.quantum_h.create_port(
-            net_id,
-            subnet_id,
-            ip_address,
-            mac_address,
-            no_security_group,
-            security_groups,
-            extra_dhcp_opts)
-        self.addCleanup(self.delete_port, port_rsp['id'], quiet=True)
-        return port_rsp
-
-    def delete_port(self, port_id, quiet=False):
-        self._remove_from_cleanup(self.quantum_h.delete_port, (port_id))
-        if quiet and not self.quantum_h.get_port(port_id):
-            return
-        self.quantum_h.delete_port(port_id)
-
-    def update_port(self, port_id, port_dict):
-        if not self.quantum_h.get_port(port_id):
-            self.logger.error('Port with port_id %s not found' % port_id)
-            return
-        else:
-            port_rsp = self.quantum_h.update_port(port_id, port_dict)
-        return port_rsp
-
-    def add_router_interface(self, router_id, subnet_id=None, port_id=None,
-                             cleanup=True):
-        if subnet_id:
-            result = self.quantum_h.add_router_interface(
-                router_id, subnet_id)
-        elif port_id:
-            result = self.quantum_h.add_router_interface(router_id,
-                                                               port_id=port_id)
-
-        if cleanup:
-            self.addCleanup(self.delete_router_interface,
-                            router_id, subnet_id, port_id)
-        return result
-
-    def delete_router_interface(self, router_id, subnet_id=None, port_id=None):
-        self._remove_from_cleanup(self.delete_router_interface,
-                                  (router_id, subnet_id, port_id))
-        self.quantum_h.delete_router_interface(
-            router_id, subnet_id, port_id)
-
-    def add_vn_to_router(self, router_id, vn_fixture, cleanup=True):
-        return self.add_router_interface(
-            router_id,
-            subnet_id=vn_fixture.vn_subnet_objs[0]['id'], cleanup=cleanup)
-
-    def delete_vn_from_router(self, router_id, vn_fixture):
-        return self.delete_router_interface(
-            router_id,
-            vn_fixture.vn_subnet_objs[0]['id'])
-
-    def create_security_group(self, name, quantum_handle=None):
-        q_h = None
-        if quantum_handle:
-            q_h = quantum_handle
-        else:
-            q_h = self.quantum_h
-        obj = q_h.create_security_group(name)
-        if obj:
-            self.addCleanup(self.delete_security_group, obj['id'])
-        return obj
-    # end create_security_group
-
-    def delete_security_group(self, sg_id, quantum_handle=None):
-        q_h = None
-        if quantum_handle:
-            q_h = quantum_handle
-        else:
-            q_h = self.quantum_h
-        q_h.delete_security_group(sg_id)
 
     def update_default_quota_list(
             self,
@@ -188,7 +70,8 @@ class BaseNeutronTest(test.BaseTestCase):
                 cfgm_ip,
                 issue_cmd,
                 self.inputs.host_data[cfgm_ip]['username'],
-                self.inputs.host_data[cfgm_ip]['password'])
+                self.inputs.host_data[cfgm_ip]['password'],
+                container='api-server')
 
         self.addCleanup(
             self.restore_default_quota_list,
@@ -240,15 +123,20 @@ class BaseNeutronTest(test.BaseTestCase):
                     cfgm_ip,
                     issue_cmd,
                     self.inputs.host_data[cfgm_ip]['username'],
-                    self.inputs.host_data[cfgm_ip]['password'])
+                    self.inputs.host_data[cfgm_ip]['password'],
+                    container='api-server')
                 count = count + 1
 
         # Restart contrail-api service on all cfgm nodes
 
         for cfgm_ip in self.inputs.cfgm_ips:
-            self.inputs.restart_service('contrail-api', [cfgm_ip])
+            self.inputs.restart_service('contrail-api', [cfgm_ip],
+                                        container='api-server')
 
-        time.sleep(30)
+        cs_obj = ContrailStatusChecker(self.inputs)
+        clusterstatus, error_nodes = cs_obj.wait_till_contrail_cluster_stable()
+        assert clusterstatus, (
+            'Hash of error nodes and services : %s' % (error_nodes))
 
     # end update_default_quota_list
 
@@ -265,12 +153,17 @@ class BaseNeutronTest(test.BaseTestCase):
                 cfgm_ip,
                 issue_cmd,
                 self.inputs.host_data[cfgm_ip]['username'],
-                self.inputs.host_data[cfgm_ip]['password'])
+                self.inputs.host_data[cfgm_ip]['password'],
+                container='api-server')
 
         for cfgm_ip in self.inputs.cfgm_ips:
-            self.inputs.restart_service('contrail-api', [cfgm_ip])
+            self.inputs.restart_service('contrail-api', [cfgm_ip],
+                container='api-server')
 
-        time.sleep(30)
+        cs_obj = ContrailStatusChecker(self.inputs)
+        clusterstatus, error_nodes = cs_obj.wait_till_contrail_cluster_stable()
+        assert clusterstatus, (
+            'Hash of error nodes and services : %s' % (error_nodes))
 
     # end restore_default_quota_list
 
@@ -297,7 +190,6 @@ class BaseNeutronTest(test.BaseTestCase):
 
         self.project_fixture = self.useFixture(
             ProjectFixture(
-                vnc_lib_h=self.vnc_lib,
                 project_name=self.inputs.project_name,
                 connections=self.connections))
         self.logger.info(
@@ -308,7 +200,7 @@ class BaseNeutronTest(test.BaseTestCase):
 
     # end allow_default_sg_to_allow_all_on_project
 
-    def verify_snat(self, vm_fixture, expectation=True):
+    def verify_snat(self, vm_fixture, expectation=True, timeout=200):
         result = True
         self.logger.info("Ping to 8.8.8.8 from vm %s" % (vm_fixture.vm_name))
         if not vm_fixture.ping_with_certainty('8.8.8.8',
@@ -317,8 +209,8 @@ class BaseNeutronTest(test.BaseTestCase):
                               (vm_fixture.vm_name))
             result = result and False
         self.logger.info('Testing FTP...Copying VIM files to VM via FTP')
-        run_cmd = "wget ftp://ftp.vim.org/pub/vim/unix/vim-7.3.tar.bz2"
-        vm_fixture.run_cmd_on_vm(cmds=[run_cmd])
+        run_cmd = "wget http://ftp.vim.org/pub/vim/unix/vim-7.3.tar.bz2"
+        vm_fixture.run_cmd_on_vm(cmds=[run_cmd], timeout=timeout)
         output = vm_fixture.return_output_values_list[0]
         if not output or 'saved' not in output:
             self.logger.error("FTP failed from VM %s" %
@@ -345,22 +237,110 @@ class BaseNeutronTest(test.BaseTestCase):
             return next_hops['itf']
     # end get_active_snat_node
 
-    def config_aap(self, port1, port2, ip):
-        self.logger.info('Configuring AAP on ports %s and %s' %
-                         (port1['id'], port2['id']))
-        port1_dict = {'allowed_address_pairs': [
-            {"ip_address": ip + '/32', "mac_address": port1['mac_address']}]}
-        port1_rsp = self.update_port(port1['id'], port1_dict)
-        port2_dict = {'allowed_address_pairs': [
-            {"ip_address": ip + '/32', "mac_address": port2['mac_address']}]}
-        port2_rsp = self.update_port(port2['id'], port2_dict)
+    def create_fip(self, fip_fixture):
+        self.logger.info('Creating FIP from %s' % fip_fixture.pool_name)
+        return self.vnc_h.create_floating_ip(fip_fixture.fip_pool_obj, fip_fixture.project_obj)
+
+    def assoc_fip(self, fip_id, vm_id, vmi_id=None):
+        if vmi_id:
+            return self.vnc_h.assoc_floating_ip(fip_id, vm_id, vmi_id=vmi_id)
+        else:
+            return self.vnc_h.assoc_floating_ip(fip_id, vm_id)
+
+    def assoc_fixed_ip_to_fip(self, fip_id, fixed_ip):
+        return self.vnc_h.assoc_fixed_ip_to_floating_ip(fip_id, fixed_ip)
+
+    def disassoc_fip(self, fip_id):
+        self.vnc_h.disassoc_floating_ip(fip_id)
+
+    def del_fip(self, fip_id):
+        self.vnc_h.delete_floating_ip(fip_id)
+
+    def config_aap(self, port, prefix, prefix_len=32, mac='', aap_mode='active-standby', contrail_api=False):
+        self.logger.info('Configuring AAP on port %s' % port['id'])
+        if is_v6(prefix):
+            prefix_len = 128
+        if contrail_api:
+            self.vnc_h.add_allowed_address_pair(
+                port['id'], prefix, prefix_len, mac, aap_mode)
+        else:
+            port_dict = {'allowed_address_pairs': [
+                {"ip_address": prefix + '/' + str(prefix_len), "mac_address": mac}]}
+            port_rsp = self.update_port(port['id'], port_dict)
         return True
     # end config_aap
+
+    def config_vrrp_on_vsrx(self, src_vm=None, dst_vm=None, vip=None, priority='100', interface='ge-0/0/1'):
+        cmdList = []
+        cmdList.append('deactivate security nat source rule-set TestNat')
+        cmdList.append(
+            'deactivate interfaces ge-0/0/1 unit 0 family inet filter')
+        cmdList.append('deactivate interfaces ' +
+                       interface + ' unit 0 family inet dhcp')
+        cmdList.append('deactivate security policies')
+        cmdList.append(
+            'set security forwarding-options family inet6 mode packet-based')
+        cmdList.append(
+            'set security forwarding-options family mpls mode packet-based')
+        cmdList.append(
+            'set security forwarding-options family iso mode packet-based')
+        vm_ip = dst_vm.vm_ips[int(interface[-1])]
+        vsrx_vrrp_config = ['set interfaces ' + interface + ' unit 0 family inet address ' + vm_ip
+                            + '/' + '24 vrrp-group 1 priority ' + priority + ' virtual-address ' + vip + ' accept-data']
+        cmdList = cmdList + vsrx_vrrp_config
+        cmd_string = (';').join(cmdList)
+        result = self.set_config_via_netconf(src_vm, dst_vm,
+                                             cmd_string, timeout=10, device='junos', hostkey_verify="False")
+        return result
+    # end config_vrrp_on_vsrx
+
+    def set_config_via_netconf(self, src_vm, dst_vm, cmd_string, timeout=10, device='junos', hostkey_verify="False"):
+        python_code = Template('''
+from ncclient import manager
+conn = manager.connect(host='$ip', username='$username', password='$password',timeout=$timeout, device_params=$device_params, hostkey_verify=$hostkey_verify)
+conn.lock()
+send_config = conn.load_configuration(action='set', config=$cmdList)
+check_config = conn.validate()
+compare_config = conn.compare_configuration()
+conn.commit()
+conn.reboot()
+conn.unlock()
+conn.close_session()
+    	''')
+        if hostkey_verify == 'False':
+            hostkey_verify = bool(False)
+        timeout = int(timeout)
+        if device == 'junos':
+            device_params = {'name': 'junos'}
+        cmdList = cmd_string.split(';')
+        python_code = python_code.substitute(ip=str(dst_vm.vm_ip), username=str(dst_vm.vm_username), password=str(
+            dst_vm.vm_password), device_params=device_params, cmdList=cmdList, timeout=timeout, hostkey_verify=hostkey_verify)
+        assert dst_vm.wait_for_ssh_on_vm(port='830')
+        op = src_vm.run_python_code(python_code)
+    # end set_config_via_netconf
+
+    def get_config_via_netconf(self, src_vm, dst_vm, cmd_string, timeout=10, device='junos', hostkey_verify="False", format='text'):
+        python_code = Template('''
+from ncclient import manager
+conn = manager.connect(host='$ip', username='$username', password='$password',timeout=$timeout, device_params=$device_params, hostkey_verify=$hostkey_verify)
+get_config=conn.command(command='$cmd', format='$format')
+print get_config.tostring
+    	''')
+        if hostkey_verify == 'False':
+            hostkey_verify = bool(False)
+        if device == 'junos':
+            device_params = {'name': 'junos'}
+        cmdList = cmd_string.split(';')
+        python_code = python_code.substitute(ip=str(dst_vm.vm_ip), username=str(dst_vm.vm_username), password=str(
+            dst_vm.vm_password), device_params=device_params, cmd=cmd_string, timeout=timeout, hostkey_verify=hostkey_verify, format=format)
+        assert dst_vm.wait_for_ssh_on_vm(port='830')
+        op = src_vm.run_python_code(python_code)
+        return op
 
     @retry(delay=5, tries=10)
     def config_vrrp(self, vm_fix, vip, priority):
         self.logger.info('Configuring VRRP on %s ' % vm_fix.vm_name)
-        vrrp_cmd = 'nohup vrrpd -D -i eth0 -v 1 -a none -p %s -d 3 %s' % (
+        vrrp_cmd = 'nohup vrrpd -n -D -i eth0 -v 1 -a none -p %s -d 3 %s' % (
             priority, vip)
         vm_fix.run_cmd_on_vm(cmds=[vrrp_cmd], as_sudo=True)
         result = self.vrrp_chk(vm_fix)
@@ -378,41 +358,84 @@ class BaseNeutronTest(test.BaseTestCase):
             result = False
             self.logger.error('vrrpd not running in %s' % vm.vm_name)
         return result
-    # end vrrp_mas_chk
+    # end vrrp_chk
 
     @retry(delay=5, tries=10)
-    def vrrp_mas_chk(self, vm, vn, ip):
-        vrrp_mas_chk_cmd = 'ip -4 addr ls'
+    def vrrp_mas_chk(self, src_vm=None, dst_vm=None, vn=None, ip=None, vsrx=False):
         self.logger.info(
             'Will verify who the VRRP master is and the corresponding route entries in the Agent')
-        vm.run_cmd_on_vm(cmds=[vrrp_mas_chk_cmd], as_sudo=True)
-        output = vm.return_output_cmd_dict[vrrp_mas_chk_cmd]
-        result = False
-        if ip in output:
-            self.logger.info('%s is selected as the VRRP Master' % vm.vm_name)
-            result = True
+        if is_v4(ip):
+            prefix = '32'
+            vrrp_mas_chk_cmd = 'ip -4 addr ls'
+        elif is_v6(ip):
+            prefix = '128'
+            vrrp_mas_chk_cmd = 'ip -6 addr ls'
+
+        if vsrx:
+            vrrp_mas_chk_cmd = 'show vrrp'
+            result = self.get_config_via_netconf(
+                src_vm, dst_vm, vrrp_mas_chk_cmd, timeout=10, device='junos', hostkey_verify="False", format='text')
+            if result == False:
+                return result
+            if 'master' in result:
+                self.logger.info(
+                    '%s is selected as the VRRP Master' % dst_vm.vm_name)
+                result = True
+            else:
+                result = False
+                self.logger.error('VRRP Master not selected')
         else:
+            dst_vm.run_cmd_on_vm(cmds=[vrrp_mas_chk_cmd], as_sudo=True)
+            output = dst_vm.return_output_cmd_dict[vrrp_mas_chk_cmd]
             result = False
-            self.logger.error('VRRP Master not selected')
+            if ip in output:
+                self.logger.info(
+                    '%s is selected as the VRRP Master' % dst_vm.vm_name)
+                result = True
+            else:
+                result = False
+                self.logger.error('VRRP Master not selected')
+        result = result and self.check_master_in_agent(dst_vm, vn, ip,
+                                                       prefix_len=prefix)
+        return result
+    # end vrrp_mas_chk
+
+    @retry(delay=3, tries=5)
+    def check_master_in_agent(self, vm, vn, ip, prefix_len='32', ecmp=False):
         inspect_h = self.agent_inspect[vm.vm_node_ip]
         (domain, project, vnw) = vn.vn_fq_name.split(':')
         agent_vrf_objs = inspect_h.get_vna_vrf_objs(domain, project, vnw)
         agent_vrf_obj = vm.get_matching_vrf(
             agent_vrf_objs['vrf_list'], vn.vrf_name)
         vn1_vrf_id = agent_vrf_obj['ucindex']
-        paths = inspect_h.get_vna_active_route(
-            vrf_id=vn1_vrf_id, ip=ip, prefix='32')['path_list']
+        result = False
+        paths = []
+        try:
+            paths = inspect_h.get_vna_active_route(
+                vrf_id=vn1_vrf_id, ip=ip, prefix=prefix_len)['path_list']
+        except TypeError:
+            self.logger.info('Unable to retreive path info')
         for path in paths:
             if path['peer'] == 'LocalVmPort' and path['path_preference_data']['wait_for_traffic'] == 'false':
                 result = True
-                break
+                if ecmp:
+                    if path['path_preference_data']['ecmp'] == 'true':
+                        result = True
+                        break
+                    else:
+                        result = False
+                        return result
+                else:
+                    break
             else:
                 result = False
+                self.logger.error(
+                    'Path to %s not found in %s' % (ip, vm.vm_node_ip))
         return result
     # end vrrp_mas_chk
 
     @retry(delay=5, tries=10)
-    def verify_vrrp_action(self, src_vm, dst_vm, ip):
+    def verify_vrrp_action(self, src_vm, dst_vm, ip, vsrx=False):
         result = False
         self.logger.info('Will ping %s from %s and check if %s responds' % (
             ip, src_vm.vm_name, dst_vm.vm_name))
@@ -420,29 +443,26 @@ class BaseNeutronTest(test.BaseTestCase):
         compute_user = self.inputs.host_data[compute_ip]['username']
         compute_password = self.inputs.host_data[compute_ip]['password']
         session = ssh(compute_ip, compute_user, compute_password)
-        vm_tapintf = dst_vm.tap_intf[dst_vm.vn_fq_name]['name']
-        cmd = 'tcpdump -nni %s -c 10 > /tmp/%s_out.log' % (
+        if vsrx:
+            vm_tapintf = dst_vm.tap_intf[dst_vm.vn_fq_names[1]]['name']
+        else:
+            vm_tapintf = dst_vm.tap_intf[dst_vm.vn_fq_name]['name']
+        cmd = 'sudo tcpdump -nni %s -c 2 icmp > /tmp/%s_out.log' % (
             vm_tapintf, vm_tapintf)
         execute_cmd(session, cmd, self.logger)
-        assert src_vm.ping_with_certainty(ip), 'Ping to vIP failure'
+        assert src_vm.ping_with_certainty(ip)
         output_cmd = 'cat /tmp/%s_out.log' % vm_tapintf
         output, err = execute_cmd_out(session, output_cmd, self.logger)
-        if ip in output:
+        if src_vm.vm_ip in output:
             result = True
             self.logger.info(
                 '%s is seen responding to ICMP Requests' % dst_vm.vm_name)
         else:
-            self.logger.error('ICMP Requests not seen on the VRRP Master')
+            self.logger.error(
+                'ICMP Requests to %s not seen on the VRRP Master' % ip)
             result = False
         return result
-    # end verify_vrrp_sction
-
-    def _remove_from_cleanup(self, func_call, *args):
-        for cleanup in self._cleanups:
-            if func_call in cleanup and args == cleanup[1]:
-                self._cleanups.remove(cleanup)
-                return True
-        return False
+    # end verify_vrrp_action
 
     def create_lb_pool(self, name, lb_method, protocol, subnet_id):
         lb_pool_resp = None
@@ -459,9 +479,9 @@ class BaseNeutronTest(test.BaseTestCase):
         result, msg = self.verify_pool_not_in_api_server(pool_id)
         assert result, msg
 
-    @retry(delay=10, tries=10)
+    @retry(delay=10, tries=20)
     def verify_pool_not_in_api_server(self, pool_id):
-        pool = self.api_s_inspect.get_lb_pool(pool_id)
+        pool = self.api_s_inspect.get_lb_pool(pool_id, refresh=True)
         if pool:
             self.logger.warn("pool with pool id %s still present in API"
                              " server even after pool delete.retrying..." % (pool_id))
@@ -533,7 +553,7 @@ class BaseNeutronTest(test.BaseTestCase):
     def create_vip(self, name, protocol, protocol_port, subnet_id, pool_id):
         vip_resp = None
         vip_resp = self.quantum_h.create_vip(
-            name, protocol, protocol_port, subnet_id, pool_id)
+            name, protocol, protocol_port, pool_id, subnet_id)
         if vip_resp:
             self.addCleanup(self.verify_on_vip_delete, pool_id, vip_resp['id'])
             self.addCleanup(self.quantum_h.delete_vip,
@@ -573,15 +593,16 @@ class BaseNeutronTest(test.BaseTestCase):
         out = self.inputs.run_cmd_on_server(
             compute_ip, cmd,
             self.inputs.host_data[compute_ip]['username'],
-            self.inputs.host_data[compute_ip]['password'])
+            self.inputs.host_data[compute_ip]['password'],
+            container='agent')
         if out:
             self.logger.warn("NET NS: %s still present for pool name: %s with UUID: %s"
                              " even after VIP delete in compute node %s"
-                             % (out, pool_obj['pool']['name'], pool_id, compute_ip))
+                             % (out, pool_obj['name'], pool_id, compute_ip))
             errmsg = "NET NS still present after vip delete, failed in compute %s" % compute_ip
             return False, errmsg
         self.logger.debug("NET NS deleted successfully for pool name: %s with"
-                          " UUID :%s in compute node %s" % (pool_obj['pool']['name'], pool_id, compute_ip))
+                          " UUID :%s in compute node %s" % (pool_obj['name'], pool_id, compute_ip))
         return True, None
     # end verify_netns_delete
 
@@ -593,20 +614,21 @@ class BaseNeutronTest(test.BaseTestCase):
         out = self.inputs.run_cmd_on_server(
             compute_ip, cmd,
             self.inputs.host_data[compute_ip]['username'],
-            self.inputs.host_data[compute_ip]['password'])
+            self.inputs.host_data[compute_ip]['password'],
+            container='agent')
         output = out.split('\n')
         for out in output:
             match = re.search("nobody\s+(\d+)\s+", out)
             if match:
                 pid.append(match.group(1))
         if pid:
-            self.loger.warn("haproxy still running even after VIP delete for pool name: %s,"
-                            " with UUID: %s in compute node %s" % (pool_obj['pool']['name'], pool_id, compute_ip))
+            self.logger.warn("haproxy still running even after VIP delete for pool name: %s,"
+                            " with UUID: %s in compute node %s" % (pool_obj['name'], pool_id, compute_ip))
             errmsg = "HAPROXY still running after VIP delete failed in compute node %s" % (
                 compute_ip)
             return False, errmsg
         self.logger.debug("haproxy process got killed successfully with vip delete for pool"
-                          " name: %s UUID :%s on compute %s" % (pool_obj['pool']['name'], pool_id, compute_ip))
+                          " name: %s UUID :%s on compute %s" % (pool_obj['name'], pool_id, compute_ip))
         return True, None
     # end verify_haproxy_kill
 
@@ -662,9 +684,63 @@ class BaseNeutronTest(test.BaseTestCase):
             return True, None
     # end verify_disassociate_health_monitor
 
-    def remove_method_from_cleanups(self, method):
-        for cleanup in self._cleanups:
-            if method == cleanup:
-                self._cleanups.remove(cleanup)
-                break
-   # end remove_from_cleanups
+    def extend_vn_to_physical_router(self, vn_fixture, phy_router_fixture):
+        # Attach VN to router in Contrail API so that Device manager
+        # can configure the device
+        phy_router_fixture.add_virtual_network(vn_fixture.vn_id)
+        self.addCleanup(self.delete_vn_from_physical_router, vn_fixture,
+                        phy_router_fixture)
+    # end extend_vn_to_physical_router
+
+    def delete_vn_from_physical_router(self, vn_fixture, phy_router_fixture):
+        # Disassociate VN from the physical router so that Device manager
+        # can delete corresponding configs from the device
+        phy_router_fixture.delete_virtual_network(vn_fixture.vn_id)
+    # end delete_vn_from_physical_router
+
+    def get_subnets_count(self, project_uuid):
+        return  len(self.quantum_h.obj.list_subnets(
+                    tenant_id=project_uuid)['subnets'])
+    # end get_subnets_count
+
+    @retry(delay=5, tries=10)
+    def config_keepalive(self, vm_fix, vip, vid, priority):
+        self.logger.info('Configuring Keepalive on %s ' % vm_fix.vm_name)
+        cmdList = []
+        cmdList.append("rm -rf /etc/keepalived/keepalived.conf")
+        cmdList.append("printf 'vrrp_instance VI_1 {' >> /etc/keepalived/keepalived.conf")
+        cmdList.append("printf '\n state MASTER' >> /etc/keepalived/keepalived.conf")
+        cmdList.append("printf '\n interface eth0' >> /etc/keepalived/keepalived.conf")
+        cmdList.append("printf '\n virtual_router_id %s' >> /etc/keepalived/keepalived.conf" %vid)
+        cmdList.append("printf '\n priority %s' >> /etc/keepalived/keepalived.conf" % priority)
+        cmdList.append("printf '\n advert_int 1' >> /etc/keepalived/keepalived.conf")
+        cmdList.append("printf '\n virtual_ipaddress {' >> /etc/keepalived/keepalived.conf")
+        cmdList.append("printf '\n %s' >> /etc/keepalived/keepalived.conf" % vip)
+        cmdList.append("printf '\n }' >> /etc/keepalived/keepalived.conf")
+        cmdList.append("printf '\n}' >> /etc/keepalived/keepalived.conf")
+        vm_fix.run_cmd_on_vm(cmds=cmdList, as_sudo=True)
+        service_restart= "service keepalived start"
+        vm_fix.run_cmd_on_vm(cmds=[service_restart], as_sudo=True)
+        result = self.keepalive_chk(vm_fix)
+        return result
+    # end config_keepalive
+
+    def keepalive_chk(self, vm):
+        keepalive_chk_cmd = 'netstat -anp | grep keepalived'
+        vm.run_cmd_on_vm(cmds=[keepalive_chk_cmd], as_sudo=True)
+        keepalive_op = vm.return_output_cmd_dict[keepalive_chk_cmd]
+        if '/keepalived' in keepalive_op:
+            result = True
+            self.logger.info('keepalived running in %s' % vm.vm_name)
+        else:
+            result = False
+            self.logger.error('keepalived not running in %s' % vm.vm_name)
+        return result
+    # end keepalive_chk
+ 
+    def service_keepalived(self, vm, action):
+        keepalive_chk_cmd = 'service keepalived %s' %(action)
+        vm.run_cmd_on_vm(cmds=[keepalive_chk_cmd], as_sudo=True)
+        return True
+    # end service_keepalived
+

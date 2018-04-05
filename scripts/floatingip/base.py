@@ -1,4 +1,4 @@
-import test
+import test_v1
 from common import isolated_creds
 from common import create_public_vn
 from vn_test import *
@@ -6,41 +6,31 @@ from vm_test import *
 import fixtures
 
 
-class FloatingIpBaseTest(test.BaseTestCase):
+class FloatingIpBaseTest(test_v1.BaseTestCase_v1):
 
     @classmethod
     def setUpClass(cls):
         super(FloatingIpBaseTest, cls).setUpClass()
-        cls.isolated_creds = isolated_creds.IsolatedCreds(
-            cls.__name__,
-            cls.inputs,
-            ini_file=cls.ini_file,
-            logger=cls.logger)
-        cls.isolated_creds.setUp()
-        cls.project = cls.isolated_creds.create_tenant()
-        cls.isolated_creds.create_and_attach_user_to_tenant()
-        cls.inputs = cls.isolated_creds.get_inputs()
-        cls.connections = cls.isolated_creds.get_conections()
-        cls.admin_inputs = cls.isolated_creds.get_admin_inputs()
-        cls.admin_connections = cls.isolated_creds.get_admin_connections()
         cls.quantum_h = cls.connections.quantum_h
         cls.nova_h = cls.connections.nova_h
         cls.vnc_lib = cls.connections.vnc_lib
         cls.agent_inspect = cls.connections.agent_inspect
         cls.cn_inspect = cls.connections.cn_inspect
         cls.analytics_obj = cls.connections.analytics_obj
+        cls.orch = cls.connections.orch
+        if cls.inputs.admin_username:
+            public_creds = cls.admin_isolated_creds
+        else:
+            public_creds = cls.isolated_creds
         cls.public_vn_obj = create_public_vn.PublicVn(
-             cls.__name__,
-             cls.__name__,
-             cls.inputs,
-             ini_file=cls.ini_file,
-             logger=cls.logger)
+            connections=cls.connections,
+            isolated_creds_obj=public_creds,
+            logger=cls.logger)
         cls.public_vn_obj.configure_control_nodes()
     # end setUpClass
 
     @classmethod
     def tearDownClass(cls):
-        cls.isolated_creds.delete_tenant()
         super(FloatingIpBaseTest, cls).tearDownClass()
     # end tearDownClass
 
@@ -60,11 +50,11 @@ class FloatingIpBaseTest(test.BaseTestCase):
         dest_vm_ip = dst_vm.vm_ip
         file_sizes = ['1000', '1101', '1202']
         for size in file_sizes:
-            self.logger.info("-" * 80)
-            self.logger.info("FILE SIZE = %sB" % size)
-            self.logger.info("-" * 80)
+            self.logger.debug("-" * 80)
+            self.logger.debug("FILE SIZE = %sB" % size)
+            self.logger.debug("-" * 80)
 
-            self.logger.info('Transferring the file from %s to %s using scp' %
+            self.logger.debug('Transferring the file from %s to %s using scp' %
                              (src_vm.vm_name, dst_vm.vm_name))
             filename = 'testfile'
 

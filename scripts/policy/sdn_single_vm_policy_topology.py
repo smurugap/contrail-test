@@ -1,7 +1,7 @@
 '''*******AUTO-GENERATED TOPOLOGY*********'''
 
 import sys
-
+from tcutils.util import get_random_name
 
 class sdn_single_vm_policy_config ():
 
@@ -15,34 +15,45 @@ class sdn_single_vm_policy_config ():
         self.password = password
         #
         # Define VN's in the project:
-        self.vnet_list = ['vnet0']
+        self.vnet_list = [get_random_name('vnet0')]
         #
         # Define network info for each VN:
-        self.vn_nets = {'vnet0': ['10.1.1.0/24']}
+        self.vn_nets = {self.vnet_list[0]: ['10.1.1.0/24']}
         #
         # Define network policies
-        self.policy_list = ['policy0', 'policy1', 'policy2']
-        self.vn_policy = {'vnet0': ['policy0', 'policy1']}
+        self.policy_list = list()
+        for i in range(3):
+            self.policy_list.append(get_random_name('policy%d'%i))
+        self.vn_policy = {self.vnet_list[0]: self.policy_list[:2]}
         #
         # Define VM's
         # VM distribution on available compute nodes is handled by nova
         # scheduler or contrail vm naming scheme
-        self.vn_of_vm = {'vmc0': 'vnet0'}
+        self.vn_of_vm = {get_random_name('vmc0'): self.vnet_list[0]}
         #
         # Define network policy rules
         self.rules = {}
 
-        self.rules[
-            'policy0'] = [{'direction': '>', 'protocol': 'tcp', 'dest_network': 'vnet0', 'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [0, 0]}, {'direction': '>', 'protocol': 'tcp', 'dest_network': 'vnet0',
-                                                                                                                                                                                        'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [1, 1]}, {'direction': '>', 'protocol': 'tcp', 'dest_network': 'vnet0', 'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [2, 2]}]
+        self.rules[self.policy_list[0]] = [
+            {'direction': '>', 'protocol': 'tcp',
+             'dest_network': self.vnet_list[0], 'source_network': self.vnet_list[0],
+             'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [0, 0]},
+            {'direction': '>', 'protocol': 'tcp',
+             'dest_network': self.vnet_list[0], 'source_network': self.vnet_list[0],
+             'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [1, 1]},
+            {'direction': '>', 'protocol': 'tcp',
+             'dest_network': self.vnet_list[0], 'source_network': self.vnet_list[0],
+             'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [2, 2]}]
 
-        self.rules[
-            'policy1'] = [{'direction': '>', 'protocol': 'icmp', 'dest_network': 'vnet0', 'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': 'any'}, {'direction': '>', 'protocol': 'icmp', 'dest_network': 'vnet0',
-                                                                                                                                                                                        'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': 'any'}, {'direction': '>', 'protocol': 'icmp', 'dest_network': 'vnet0', 'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': 'any'}]
+        self.rules[self.policy_list[1]] = [
+            {'direction': '>', 'protocol': 'icmp',
+             'dest_network': self.vnet_list[0], 'source_network': self.vnet_list[0],
+             'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': 'any'}]
 
-        self.rules[
-            'policy2'] = [{'direction': '>', 'protocol': 'udp', 'dest_network': 'vnet0',
-                           'source_network': 'vnet0', 'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [10, 10]}]
+        self.rules[self.policy_list[2]] = [
+            {'direction': '>', 'protocol': 'udp',
+             'dest_network': self.vnet_list[0], 'source_network': self.vnet_list[0],
+             'dst_ports': 'any', 'simple_action': 'deny', 'src_ports': [10, 10]}]
         # end __init__
 
 if __name__ == '__main__':

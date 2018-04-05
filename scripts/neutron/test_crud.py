@@ -28,13 +28,11 @@ class TestCRUD(BaseNeutronTest):
         self.proj_neutron_h = self.quantum_h.obj
 
         self.create_security_group(get_random_name('admin-sg1'),
-                                   self.neutron_test_h)
+                                   connections=self.admin_connections)
         self.create_security_group(get_random_name('admin-sg2'),
-                                   self.neutron_test_h)
-        self.create_security_group(get_random_name('proj-sg1'),
-                                   self.proj_neutron_test_h)
-        self.create_security_group(get_random_name('proj-sg2'),
-                                   self.proj_neutron_test_h)
+                                   connections=self.admin_connections)
+        self.create_security_group(get_random_name('proj-sg1'))
+        self.create_security_group(get_random_name('proj-sg2'))
         self.ks_project_id = self.project.uuid
         self.log = self.logger
         self.newline = '=' * 80 + '\n'
@@ -348,7 +346,7 @@ class TestCRUD(BaseNeutronTest):
     # end
 
     def _delete_port(self, port_id):
-        if self._remove_from_cleanup(self._delete_port, (port_id)):
+        if self.remove_from_cleanups(self._delete_port, (port_id)):
             self.log.info('Deleting port %s' % (port_id))
             try:
                 result = self.neutron_h.delete_port(port_id)
@@ -362,7 +360,7 @@ class TestCRUD(BaseNeutronTest):
         return True
 
     def _delete_network(self, network_id):
-        if self._remove_from_cleanup(self._delete_network, (network_id)):
+        if self.remove_from_cleanups(self._delete_network, (network_id)):
             self.log.info('Deleting network %s' % (network_id))
             try:
                 result = self.neutron_h.delete_network(network_id)
@@ -376,7 +374,7 @@ class TestCRUD(BaseNeutronTest):
         return True
 
     def _delete_subnet(self, subnet_id):
-        if self._remove_from_cleanup(self._delete_subnet, (subnet_id)):
+        if self.remove_from_cleanups(self._delete_subnet, (subnet_id)):
             self.log.info('Deleting subnet %s' % (subnet_id))
             try:
                 result = self.neutron_h.delete_subnet(subnet_id)
@@ -390,7 +388,7 @@ class TestCRUD(BaseNeutronTest):
         return False
 
     def _delete_router(self, router_id):
-        if self._remove_from_cleanup(self._delete_router, (router_id)):
+        if self.remove_from_cleanups(self._delete_router, (router_id)):
             self.log.info('Deleting router %s' % (router_id))
             try:
                 result = self.neutron_h.delete_router(router_id)
@@ -481,7 +479,7 @@ class TestCRUD(BaseNeutronTest):
         # end for attribute_list
     # end update_port_tests
 
-    @test.attr(type=['sanity'])
+    @test.attr(type=['sanity', 'vcenter_compute'])
     @preposttest_wrapper
     def test_router_crud(self):
         count = 0

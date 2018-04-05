@@ -1,6 +1,8 @@
 [Basic]
 # Orchestrator could be openstack, vcenter
 orchestrator=$__orch__
+slave_orchestrator=$__slave_orch__
+deployer=$__deployer__
 # JSON file describing the test setup(individual hosts roles and credentials)
 provFile=$__testbed_json_file__
 
@@ -10,15 +12,48 @@ provFile=$__testbed_json_file__
 # Nova Keypair
 key=$__nova_keypair_name__
 
-# Admin tenant credentials
+stackRegion=$__stack_region_name__
 stackUser=$__stack_user__
 stackPassword=$__stack_password__
 stackTenant=$__stack_tenant__
 stackDomain=$__stack_domain__
 
+# Set domain_isolation to true to Let the tests create and destroy domains
+# Set tenant_isolation to true to Let the tests
+# create and destroy  projects/tenants
+# Setting this to true requires that admin credentials below are populated
+# Admin tenant credentials
+domain_isolation=$__domain_isolation__
+tenant_isolation=$__tenant_isolation__
+adminUser=$__admin_user__
+adminPassword=$__admin_password__
+adminTenant=$__admin_tenant__
+
+#keystone_version
+keystone_version=$__keystone_version__
+use_project_scoped_token=$__use_project_scoped_token__
+
+# Neutron user will have member rights in the dynamically created test tenants
+neutron_username=$__neutron_username__
+
+# Nova availability zone to use to launch VMs
+availability_zone=$__availability_zone__
+
+# Image flavor to use for all tests
+ci_flavor=$__ci_flavor__
+
+# Set to False to make use of the stack user and skip user create per testscript
+# Default: True (setting tenant_isolation to False overrides user_isolation to be False)
+user_isolation=$__user_isolation__
+
 # Keystone IP can be VIP ip if HA setup
 auth_ip=$__auth_ip__
 auth_port=$__auth_port__
+auth_protocol=$__auth_protocol__
+keystone_certfile=$__keystone_certfile__
+keystone_keyfile=$__keystone_keyfile__
+keystone_cafile=$__keystone_cafile__
+keystone_insecure_flag=$__keystone_insecure_flag__
 
 # To enable multi tenancy set the below to True, default False
 multiTenancy=$__multi_tenancy__
@@ -29,12 +64,37 @@ AddressFamily=$__address_family__
 # A short description about the test run. eg. "R2.0: Ubuntu havana high availability test"
 logScenario=$__log_scenario__
 
-# If you want the HTML report, set the below to 'True'. If not, the basic Unittest TextTestRunner will run the tests
-generate_html_report=$__generate_html_report__
-
 # If you dont want fixture cleanups to remove the objects which are created as part of setUp of the fixture, set fixtureCleanup to 'no'. Default value should be 'yes'. If objects are already present before start of tests, they are not deleted. To clean them up forcefully, set fixtureCleanup to 'force'
 fixtureCleanup=$__fixture_cleanup__
 
+# Host IP for public network reachability tests
+# Default is 10.204.216.50
+public_host=
+
+# key_filename: ssh private key file name - in case ssh key based authentication is enabled for cloud nodes
+# pubkey_filename: Optional ssh public key file name, if not provided, it will try <private key filename>.pub in the
+# same directory of private key.
+key_filename=$__key_filename__
+pubkey_filename=$__pubkey_filename__
+
+# In case of HA, populate the below contrail service IPs if discovery service frontend is not over contrail_internal_vip
+# and contrail-api and contrail-analytics-api services doesnt run on contrail_external_vip
+[services]
+discovery_ip=$__discovery_ip__
+config_api_ip=$__config_api_ip__
+analytics_api_ip=$__analytics_api_ip__
+config_amqp_ips=$__config_amqp_ips__
+
+# Populate the below if the services introspect doesnt run on default ports
+# Defaults: discovery - 5998, contrail-api - 8082, contrail-analytics-api - 8081
+#           contrail-control - 8083, contrail-dns - 8092, contrail-vrouter-agent - 8085
+discovery_port=$__discovery_port__
+config_api_port=$__config_api_port__
+analytics_api_port=$__analytics_api_port__
+control_port=$__control_port__
+dns_port=$__dns_port__
+agent_port=$__vrouter_agent_port__
+config_amqp_port=$__config_amqp_port__
 
 [WebServer]
 # The URL to which the test log file and HTML report would be uploaded to.
@@ -62,6 +122,8 @@ mailSender=$__sender_mail_id__
 [proxy]
 proxy_url=$__http_proxy__
 
+[use_devicemanager_for_md5]
+use_devicemanager_for_md5=$__use_devicemanager_for_md5__
 
 [ui]
 # Provide webui=True to run webui verification testcases, Default = False
@@ -84,7 +146,7 @@ devstack=$__devstack__
 route_target=$__public_vn_rtgt__
 asn=$__router_asn__
 
-#List of Router name and IP tuples 
+#List of Router name and IP tuples
 #eg: [('mx1', '1.1.1.1'), ('mx2', '1.1.1.2')]
 router_info=$__router_name_ip_tuples__
 
@@ -94,18 +156,37 @@ fip_pool_name=$__public_vn_name__
 public_virtual_network=$__public_virtual_network__
 public_tenant_name=$__public_tenant_name__
 
-
-[repos]
-#contrail-test and contrail-fabric-utils repos version
-test_revision=$__test_revision__
-fab_revision=$__fab_revision__
-
+#IP Fabric gateway info, name and IP tuple
+#eg: [('mx1', '1.1.1.1')]
+fabric_gw_info=$__fabric_gw_name_ip_tuple__
 
 [HA]
 # HA config
 ha_setup=$__ha_setup__
 ipmi_username=$__ipmi_username__
 ipmi_password=$__ipmi_password__
+contrail_internal_vip=$__contrail_internal_vip__
+contrail_external_vip=$__contrail_external_vip__
+internal_vip=$__internal_vip__
+external_vip=$__external_vip__
+
+[vcenter]
+# VCenter configuration
+vcenter_dc=$__vcenter_dc__
+vcenter_server=$__vcenter_server__
+vcenter_port=$__vcenter_port__
+vcenter_username=$__vcenter_username__
+vcenter_password=$__vcenter_password__
+vcenter_datacenter=$__vcenter_datacenter__
+vcenter_compute=$__vcenter_compute__
+
+[cfgm]
+#API protocol, certs file location
+api_protocol=$__api_auth_protocol__
+api_certfile=$__api_certfile__
+api_keyfile=$__api_keyfile__
+api_cafile=$__api_cafile__
+api_insecure_flag=$__api_insecure_flag__
 
 [debug]
 # To pause the test execution, in pdb prompt, on failure set stop_on_fail to True, default False
@@ -113,3 +194,21 @@ stop_on_fail=$__stop_on_fail__
 
 # set to False to skip verification of VM launch, default True
 verify_on_setup=$__test_verify_on_setup__
+
+#Ukai global-controller
+[global-controller]
+gc_host_mgmt=$__gc_host_mgmt__
+gc_host_control_data=$__gc_host_control_data__
+gc_user_name=$__gc_user_name__
+gc_user_pwd=$__gc_user_pwd__
+keystone_password=$__keystone_password__
+
+#Traffice generators data
+[traffic_data]
+ixia_linux_host_ip=$__ixia_linux_host_ip__
+ixia_host_ip=$__ixia_host_ip__
+spirent_linux_host_ip=$__spirent_linux_host_ip__
+ixia_linux_username=$__ixia_linux_username__
+ixia_linux_password=$__ixia_linux_password__
+spirent_linux_username=$__spirent_linux_username__
+spirent_linux_password=$__spirent_linux_password__

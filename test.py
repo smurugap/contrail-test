@@ -7,10 +7,10 @@ import fixtures
 import testresources
 import testtools
 from common.contrail_test_init import ContrailTestInit
-from common import log_orig as logging
+from common import log_orig as contrail_logging
 #from common import config
 import logging as std_logging
-from tcutils.util import get_random_name
+from tcutils.util import get_unique_random_name
 
 def attr(*args, **kwargs):
     """A decorator which applies the  testtools attr decorator
@@ -53,7 +53,7 @@ class TagsHack(object):
                     if tag in attributes:
                         return orig
             # A hack to please testtools to get uniq testcase names
-            return get_random_name()
+            return get_unique_random_name()
 
 class BaseTestCase(TagsHack,
                    testtools.testcase.WithAttributes,
@@ -69,18 +69,11 @@ class BaseTestCase(TagsHack,
         cls.setUpClassCalled = True
         
         if 'TEST_CONFIG_FILE' in os.environ :
-            cls.ini_file= os.environ.get('TEST_CONFIG_FILE')
+            cls.input_file= os.environ.get('TEST_CONFIG_FILE')
         else:
-            cls.ini_file= 'sanity_params.ini'	
-        cls.Logger = logging.ContrailLogger(cls.__name__)
-        cls.Logger.setUp()
-        cls.logger = cls.Logger.logger
-        #LOG = logging.getLogger(cls.__name__)
-        #cls.logger = LOG
-
-        cls.inputs = ContrailTestInit(cls.ini_file,logger = cls.logger)
-        #cls.inputs = ContrailTestInit(cls.ini_file,logger = LOG)
-        cls.inputs.setUp()
+            cls.input_file= 'sanity_params.ini'
+        cls.logger = contrail_logging.getLogger(cls.__name__)
+        cls.inputs = ContrailTestInit(cls.input_file,logger = cls.logger)
 
     @classmethod
     def tearDownClass(cls):

@@ -59,17 +59,21 @@ class OpServerUtils(object):
     # end get_start_end_time
 
     @staticmethod
-    def post_url_http(url, params):
+    def post_url_http(url, params, token):
+        DEFAULT_HEADERS = {'Content-type': 'application/json; charset="UTF-8"','Expect': '202-accepted'}
+        headers = DEFAULT_HEADERS.copy()
+        if token:
+            headers['X-AUTH-TOKEN'] = token['X-AUTH-TOKEN']
         try:
             print 'request version : %s'%(pkg_resources.get_distribution("requests").version[0])
             if int(pkg_resources.get_distribution("requests").version[0]) >= 1:
                 response = requests.post(url, stream=True,
                                          data=params,
-                                         headers=OpServerUtils.POST_HEADERS)
+                                         headers=headers)
             else:
                 response = requests.post(url, prefetch=False,
                                          data=params,
-                                         headers=OpServerUtils.POST_HEADERS)
+                                         headers=headers)
         except requests.exceptions.ConnectionError, e:
             print "Connection to %s failed" % url
             return None
@@ -81,13 +85,13 @@ class OpServerUtils(object):
     # end post_url_http
 
     @staticmethod
-    def get_url_http(url):
+    def get_url_http(url, headers=None):
         data = {}
         try:
             if int(pkg_resources.get_distribution("requests").version[0]) >= 1:
-                data = requests.get(url, stream=True)
+                data = requests.get(url, stream=True, headers=headers)
             else:
-                data = requests.get(url, prefetch=False)
+                data = requests.get(url, prefetch=False, headers=headers)
         except requests.exceptions.ConnectionError, e:
             print "Connection to %s failed" % url
 
@@ -121,11 +125,11 @@ class OpServerUtils(object):
     # end parse_query_result
 
     @staticmethod
-    def get_query_result(opserver_ip, opserver_port, qid):
+    def get_query_result(opserver_ip, opserver_port, qid, headers):
         while True:
             url = OpServerUtils.opserver_query_url(
                 opserver_ip, opserver_port) + '/' + qid
-            resp = OpServerUtils.get_url_http(url)
+            resp = OpServerUtils.get_url_http(url, headers=headers)
             if resp.status_code != 200:
                 yield {}
                 return
@@ -137,7 +141,7 @@ class OpServerUtils(object):
                 for chunk in status['chunks']:
                     url = OpServerUtils.opserver_url(
                         opserver_ip, opserver_port) + chunk['href']
-                    resp = OpServerUtils.get_url_http(url)
+                    resp = OpServerUtils.get_url_http(url, headers=headers)
                     if resp.status_code != 200:
                         yield {}
                     else:
@@ -323,7 +327,7 @@ class OpServerUtils(object):
     def get_query_dict(table, start_time=None, end_time=None,
                        select_fields=None,
                        where_clause="",
-                       sort_fields=None, sort=None, limit=None, filter=None, dir=None):
+                       sort_fields=None, sort=None, limit=None, filter=None, dir=None, session_type=None):
 #    @staticmethod
 #    def get_query_dict(table, start_time = None, end_time = None,
 #            select_fields = None,
@@ -344,18 +348,21 @@ class OpServerUtils(object):
         :param where_clause: list of match conditions for the query
         :type where_clause: list of match, which is a pair of str ANDed
         :dir:int
+        :session_type: needs to be set to  client or server when querying session tables
         :returns: str -- dict of query request
         :raises: Error
 
         """
 
         try:
-            if start_time.isdigit() and end_time.isdigit():
+            if start_time.isdigit():
                 start_time = int(start_time)
-                end_time = int(end_time)
             else:
                 start_time = OpServerUtils.convert_to_utc_timestamp_usec(
                     start_time)
+            if end_time.isdigit():
+                end_time = int(end_time)
+            else:
                 end_time = OpServerUtils.convert_to_utc_timestamp_usec(
                     end_time)
         except:
@@ -430,30 +437,18 @@ class OpServerUtils(object):
 
         if len(filter_terms) == 0:
             filter_terms = None
-
-        flowtable_query = OpServerUtils.Query(table,
-                                              start_time=lstart_time,
-                                              end_time=lend_time,
-                                              select_fields=sf,
-                                              where=where,
-                                              sort_fields=sort_fields,
-                                              sort=sort,
-                                              limit=limit,
-                                              filter=filter_terms,
-                                              dir=dir)
-
-#        flowtable_query = OpServerUtils.Query(table,
-#                                             start_time = lstart_time,
-#                                             end_time = lend_time,
-#                                             select_fields = sf,
-#                                             where = where,
-#                                             sort_fields = sort_fields,
-#                                             sort = sort,
-#                                             limit = limit,
-#                                             filter = filter_terms
-#                                             )
-
-        return flowtable_query.__dict__
+        query_result = OpServerUtils.Query(table,
+                                          start_time=lstart_time,
+                                          end_time=lend_time,
+                                          select_fields=sf,
+                                          where=where,
+                                          sort_fields=sort_fields,
+                                          sort=sort,
+                                          limit=limit,
+                                          filter=filter_terms,
+                                          dir=dir,
+                                          session_type=session_type)
+        return query_result.__dict__
 
     @staticmethod
     def get_json_body(*args,**kwargs):
@@ -477,10 +472,10 @@ class OpServerUtils(object):
         limit = None
         filter = None
         dir = None
-
+        session_type = None
         def __init__(
             self, table, start_time, end_time, select_fields, where=None,
-                sort_fields=None, sort=None, limit=None, filter=None, dir=None):
+                sort_fields=None, sort=None, limit=None, filter=None, dir=None, session_type=None):
 #        def __init__(self, table, start_time, end_time, select_fields, where = None,
 # sort_fields = None, sort = None, limit = None, filter = None):
             self.table = table
@@ -499,6 +494,9 @@ class OpServerUtils(object):
                 self.filter = filter
             if dir is not None:
                 self.dir = dir
+            if session_type is not None:
+                self.session_type = session_type
+            
         # end __init__
 
     # end class Query

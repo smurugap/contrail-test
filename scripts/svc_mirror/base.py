@@ -1,22 +1,15 @@
-import test
+import test_v1
 from common.connections import ContrailConnections
 from common import isolated_creds
 
-class BaseMirrorTest(test.BaseTestCase):
+class BaseMirrorTest(test_v1.BaseTestCase_v1):
 
     @classmethod
     def setUpClass(cls):
         super(BaseMirrorTest, cls).setUpClass()
-        cls.isolated_creds = isolated_creds.IsolatedCreds(cls.__name__, \
-				cls.inputs, ini_file = cls.ini_file, \
-				logger = cls.logger)
-        cls.isolated_creds.setUp()
-        cls.project = cls.isolated_creds.create_tenant() 
-        cls.isolated_creds.create_and_attach_user_to_tenant()
-        cls.inputs = cls.isolated_creds.get_inputs()
-        cls.connections = cls.isolated_creds.get_conections() 
         cls.quantum_h= cls.connections.quantum_h
         cls.nova_h = cls.connections.nova_h
+        cls.orch = cls.connections.orch
         cls.vnc_lib= cls.connections.vnc_lib
         cls.agent_inspect= cls.connections.agent_inspect
         cls.cn_inspect= cls.connections.cn_inspect
@@ -25,14 +18,12 @@ class BaseMirrorTest(test.BaseTestCase):
 
     @classmethod
     def tearDownClass(cls):
-        #cls.isolated_creds.delete_user()
-        cls.isolated_creds.delete_tenant()
         super(BaseMirrorTest, cls).tearDownClass()
     #end tearDownClass 
 
     def remove_from_cleanups(self, fix):                                                                                                                                                                                                                                     
         for cleanup in self._cleanups:                                                                                                                                                                                                                                       
-            if fix.cleanUp in cleanup:                                                                                                                                                                                                                                       
+            if fix in cleanup:                                                                                                                                                                                                                                       
                 self._cleanups.remove(cleanup)                                                                                                                                                                                                                               
                 break                                                                                                                                                                                                                                                        
     #end remove_from_cleanups                                                                                                                                                                                                                                          

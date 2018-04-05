@@ -3,11 +3,20 @@
 import traceback, os
 from functools import wraps
 from testtools.testcase import TestSkipped
+import cgitb
+import cStringIO
 from datetime import datetime
 from tcutils.util import v4OnlyTestException
+from tcutils.test_lib.contrail_utils import check_xmpp_is_stable
 
 from cores import *
 
+def detailed_traceback():
+    buf = cStringIO.StringIO()
+    cgitb.Hook(format="text", file=buf).handle(sys.exc_info())
+    tb_txt = buf.getvalue()
+    buf.close()
+    return tb_txt
 
 def preposttest_wrapper(function):
     """Decorator to perform pretest and posttest validations.
@@ -35,7 +44,6 @@ def preposttest_wrapper(function):
         if doc:
             log.info('TEST DESCRIPTION : %s', doc)
         errmsg = []
-        nodes = get_node_ips(self.inputs)
         initial_cores = get_cores(self.inputs)
         if initial_cores:
             log.warn("Test is running with cores: %s", initial_cores)
@@ -44,14 +52,18 @@ def preposttest_wrapper(function):
         if initial_crashes:
             log.warn("Test is running with crashes: %s", initial_crashes)
 
+        (flap_check_result, initial_xmpp_flaps) = check_xmpp_is_stable(
+                self.inputs, self.connections)
+
         testfail = None
         testskip = None
         try:
             # check state of the connections.
-            if not self.inputs.verify_control_connection(
-                    connections=self.connections):
-                log.warn("Pre-Test validation failed.."
-                         " Skipping test %s" % (function.__name__))
+            # Commenting below 4 lines due to discovery changes in R4.0 - Bug 1658035
+            #if not self.inputs.verify_control_connection(
+            #        connections=self.connections):
+            #    log.warn("Pre-Test validation failed.."
+            #             " Skipping test %s" % (function.__name__))
       #WA for bug 1362020 
       #          assert False, "Test did not run since Pre-Test validation failed\
       #                         due to BGP/XMPP connection issue"
@@ -61,6 +73,8 @@ def preposttest_wrapper(function):
             (test_valid, reason) = self.is_test_applicable()
             if not test_valid:
                 raise self.skipTest(reason) 
+            log.info('Initial checks done. Running the testcase now')
+            log.info('')
             result = function(self, *args, **kwargs)
         except KeyboardInterrupt:
             raise
@@ -70,10 +84,7 @@ def preposttest_wrapper(function):
             result = True
             raise
         except Exception, testfail:
-            et, ei, tb = sys.exc_info()
-            formatted_traceback = ''.join(traceback.format_tb(tb))
-            test_fail_trace = '\n{0}\n{1}:\n{2}'.format(formatted_traceback,
-                                                        et.__name__, ei.message)
+            test_fail_trace = detailed_traceback()
             # Stop the test in the fail state for debugging purpose
             if self.inputs.stop_on_fail:
                 print test_fail_trace
@@ -130,13 +141,18 @@ def preposttest_wrapper(function):
                 log.error(msg)
                 errmsg.append(msg)
 
+            (flap_check_result, current_xmpp_flags)= check_xmpp_is_stable(
+                self.inputs, self.connections, initial_xmpp_flaps)
+
             test_time = datetime.now().replace(microsecond=0) - start_time
             if cores == {} and crashes == {} and not testfail and \
-			not cleanupfail and result is None:
+		            not cleanupfail and (result is None or result is True) and \
+                    flap_check_result:
                 log.info("END TEST : %s : PASSED[%s]",
                          function.__name__, test_time)
                 log.info('-' * 80)
-            elif cores or crashes or testfail or cleanupfail or result is False:
+            elif cores or crashes or testfail or cleanupfail or \
+                    result is False or not flap_check_result:
                 log.info('')
                 log.info("END TEST : %s : FAILED[%s]",
                          function.__name__, test_time)

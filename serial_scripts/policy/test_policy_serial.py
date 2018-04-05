@@ -16,7 +16,9 @@ import copy
 import random
 import sdn_policy_traffic_test_topo
 from common.topo import sdn_policy_topo_with_multi_project
-
+from tcutils.util import get_random_name, get_random_cidr, gen_str_with_spl_char
+import os
+from tcutils.contrail_status_check import ContrailStatusChecker
 
 class TestSerialPolicy(BaseSerialPolicyTest):
     _interface = 'json'
@@ -138,7 +140,7 @@ class TestSerialPolicy(BaseSerialPolicyTest):
             self.logger.info(
                 "--->VNA-Flow check: Looking for following test flow: %s" %
                 (json.dumps(flow, sort_keys=True)))
-            vnet_list = [flow['source_vn'], flow['dst_vn']]
+            vnet_list = [flow['src_vn_match'], flow['dst_vn_match']]
             policy_route_state = self.check_policy_route_available(
                 vnet_list, vn_fixture)
             try:
@@ -180,14 +182,14 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                              (json.dumps(agent_flow, sort_keys=True)))
 
             # For a matching flow, check following key values
-            keys_to_verify = ['dst_vn', 'action']
+            keys_to_verify = ['dst_vn_match', 'action']
 
             # For matching flow, check dest_vn and action to see if they are
             # intact
             for k in keys_to_verify:
                 err_msg = None
                 match = True
-                if k == 'action':
+                if k == keys_to_verify[1]:
                     if flow[k][0] == 'pass':
                         if agent_flow[k] == 'pass' or agent_flow[k] == '32':
                             match = match and True
@@ -206,7 +208,7 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                                 (k, expected, agent_flow[k]))
                             match = match and False
                             break
-                elif k == 'dst_vn':
+                elif k == keys_to_verify[0]:
                     expected_vn = "__UNKNOWN__" if policy_route_state == False else flow[
                         k]
                     if expected_vn == agent_flow[k]:
@@ -277,8 +279,8 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                 f = test_flow['flow_entries']
                 f['src'] = test_vm1_fixture.vm_ip
                 f['dst'] = test_vm2_fixture.vm_ip
-                f['source_vn'] = test_vn_vm1_fix.vn_fq_name
-                f['dst_vn'] = test_vn_vm2_fix.vn_fq_name
+                f['src_vn_match'] = test_vn_vm1_fix.vn_fq_name
+                f['dst_vn_match'] = test_vn_vm2_fix.vn_fq_name
                 vm1_vn_fq_name = test_vm1_fixture.vn_fq_name
                 nh = test_vm1_fixture.tap_intf[vm1_vn_fq_name]['flow_key_idx']
                 f['nh_id'] = nh
@@ -509,9 +511,11 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         # Stop on Active node
         self.logger.info('Stoping the Control service in  %s' %
                          (active_controller))
-        self.inputs.stop_service('contrail-control', [active_controller])
+        self.inputs.stop_service('contrail-control', [active_controller],
+                                 container='control')
         self.addCleanup(self.inputs.start_service,
-                        'contrail-control', [active_controller])
+                        'contrail-control', [active_controller],
+                        container='control')
         time.sleep(5)
 
         # Check the control node shifted to other control node
@@ -588,12 +592,16 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         # Start the control node service again
         self.logger.info('Starting the Control service in  %s' %
                          (active_controller))
-        self.inputs.start_service('contrail-control', [active_controller])
+        self.inputs.start_service('contrail-control', [active_controller],
+                                  container='control')
 
         time.sleep(10)
+        #get the management ip corresponding to new_active_controller
+        host = self.inputs.host_data[new_active_controller]
+        host_ip = self.inputs.host_data[host['name']]['host_ip']
         # Check the BGP peering status from the currently active control node
         cn_bgp_entry = self.cn_inspect[
-            new_active_controller].get_cn_bgp_neigh_entry()
+            host_ip].get_cn_bgp_neigh_entry()
         time.sleep(5)
         for entry in cn_bgp_entry:
             if entry['state'] != 'Established':
@@ -606,9 +614,11 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         self.logger.info("Will fallback to original primary control-node..")
         self.logger.info('Stoping the Control service in  %s' %
                          (new_active_controller))
-        self.inputs.stop_service('contrail-control', [new_active_controller])
+        self.inputs.stop_service('contrail-control', [new_active_controller],
+                                 container='control')
         self.addCleanup(self.inputs.start_service,
-                        'contrail-control', [new_active_controller])
+                        'contrail-control', [new_active_controller],
+                        container='control')
         time.sleep(5)
 
         # Check the control node shifted back to previous cont
@@ -661,7 +671,8 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         # Start the control node service again
         self.logger.info('Starting the Control service in  %s' %
                          (new_active_controller))
-        self.inputs.start_service('contrail-control', [new_active_controller])
+        self.inputs.start_service('contrail-control', [new_active_controller],
+                                  container='control')
         if not result:
             self.logger.error('Switchover of control node failed')
             assert result
@@ -711,6 +722,11 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         Generate traffic streams matching policy rules - udp & icmp for now..
         assert if traffic failure is seen as no disruptive trigger is applied here..
         """
+        #Set the flow export rate to export all the flows to opserver
+        vnc_lib_fixture = self.connections.vnc_lib_fixture
+        current_rate = vnc_lib_fixture.get_flow_export_rate()
+        vnc_lib_fixture.set_flow_export_rate(100)
+        self.addCleanup(vnc_lib_fixture.set_flow_export_rate, current_rate)
         result = True
         msg = []
         #
@@ -846,10 +862,8 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                     'sourceip',
                     'destvn',
                     'destip',
-                    'sum(packets)',
-                    'flow_count',
-                    'sum(bytes)',
-                    'sum(bytes)'],
+                    'SUM(packets)',
+                    'SUM(bytes)'],
                 where_clause=query[proto])
             msg1 = proto + \
                 " Flow count info is not matching with opserver flow series record"
@@ -858,7 +872,7 @@ class TestSerialPolicy(BaseSerialPolicyTest):
             expected_flow_count[proto] = total_streams[proto]
             self.logger.info(flow_series_data[proto])
             self.assertEqual(
-                flow_series_data[proto][0]['flow_count'],
+                len(flow_series_data[proto]),
                 expected_flow_count[proto],
                 msg1)
         # 5. Stop Traffic
@@ -886,11 +900,10 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                     'sourceip',
                     'destvn',
                     'destip',
-                    'sum(packets)',
-                    'flow_count',
-                    'sum(bytes)',
-                    'sum(bytes)'],
+                    'SUM(packets)',
+                    'SUM(bytes)'],
                 where_clause=query[proto])
+
         self.assertEqual(result, True, msg)
         # 6. Match traffic stats against Analytics flow series data
         self.logger.info("-" * 80)
@@ -908,7 +921,7 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                 "***Actual Traffic sent by agent %s \n\n stats shown by Analytics flow series%s" %
                 (traffic_stats[proto], flow_series_data[proto]))
             self.assertGreaterEqual(
-                flow_series_data[proto][0]['sum(packets)'],
+                flow_series_data[proto][0]['SUM(packets)'],
                 traffic_stats[proto]['total_pkt_sent'],
                 msg[proto])
 
@@ -931,10 +944,8 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                     'sourceip',
                     'destvn',
                     'destip',
-                    'sum(packets)',
-                    'flow_count',
-                    'sum(bytes)',
-                    'sum(bytes)'],
+                    'SUM(packets)',
+                    'SUM(bytes)'],
                 where_clause=query[proto])
             msg = proto + \
                 " Flow count info is not matching with opserver flow series record after flow age out in kernel"
@@ -950,17 +961,15 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                     'sourceip',
                     'destvn',
                     'destip',
-                    'sum(packets)',
-                    'flow_count',
-                    'sum(bytes)',
-                    'sum(bytes)'],
+                    'SUM(packets)',
+                    'SUM(bytes)'],
                 where_clause=query[proto])
             msg = proto + \
                 " Traffic Stats is not matching with opServer flow series data after flow age out in kernel"
             # Historical data should be present in the Analytics, even if flows
             # age out in kernel
             self.assertGreaterEqual(
-                flow_series_data[proto][0]['sum(packets)'],
+                flow_series_data[proto][0]['SUM(packets)'],
                 traffic_stats[proto]['total_pkt_sent'],
                 msg)
         return result
@@ -1283,12 +1292,12 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         # set project name
         try:
             # provided by wrapper module if run in parallel test env
-            topo_params = "project=self.project.project_name, username=self.project.username, password=self.project.password"
+            topo = topology_class_name(project=self.project.project_name,
+                username=self.project.username, password=self.project.password,
+                num_compute=computes, num_vm_per_compute=vms_per_compute)
         except NameError:
-            topo_params = ""
-        topo_params = topo_params + \
-            "num_compute=computes, num_vm_per_compute=vms_per_compute"
-        topo = topology_class_name(topo_params)
+            topo = topology_class_name(num_compute=computes,
+                num_vm_per_compute=vms_per_compute)
         planned_per_compute_num_streams = vms_per_compute * num_streams
         total_streams_generated = planned_per_compute_num_streams * computes
         self.logger.info("Total streams to be generated per compute: %s" %
@@ -1608,6 +1617,9 @@ class TestSerialPolicy(BaseSerialPolicyTest):
         for project in topo_obj.project_list:
             setup_obj = {}
             topo[project] = eval("topo_obj.build_topo_" + project + "()")
+            if (project == self.inputs.admin_tenant and (not topo[project].username)):
+                topo[project].username = self.inputs.admin_username
+                topo[project].password = self.inputs.admin_password
             setup_obj[project] = self.useFixture(
                 sdnTopoSetupFixture(self.connections, topo[project]))
             out = setup_obj[project].topo_setup()
@@ -2192,7 +2204,10 @@ class TestSerialPolicy(BaseSerialPolicyTest):
     def test_policy_with_implict_rule_proto_traffic(self):
         """ Call policy_test_for_implicit_rule_proto_traffic with multi VN scenario.
         """
-        topo = sdn_policy_traffic_test_topo.sdn_3vn_4vm_config()
+        topo = sdn_policy_traffic_test_topo.sdn_3vn_4vm_config(
+                project=self.connections.project_name,
+                username=self.connections.username,
+                password=self.connections.password)
         return self.policy_test_with_implicit_rule_proto_traffic(topo)
 
     def policy_test_with_implicit_rule_proto_traffic(self, topo):
@@ -2292,6 +2307,90 @@ class TestSerialPolicy(BaseSerialPolicyTest):
                     "Traffic flow generation is done for different network implicit rule :%s",
                     diff_ntw_im_rule)
         return result
-        # end test_policy_with_implicit_proto_traffic
+    # end test_policy_with_implicit_proto_traffic
 
-# end of class TestSerialPolicy
+    def create_vn(self, vn_name, subnets):
+        return self.useFixture(
+            VNFixture(project_name=self.inputs.project_name,
+                      connections=self.connections,
+                      inputs=self.inputs,
+                      vn_name=vn_name,
+                      subnets=subnets))
+
+    def create_vm(
+            self,
+            vn_fixture,
+            vm_name,
+            node_name=None,
+            flavor='contrail_flavor_small',
+            image_name='ubuntu-traffic'):
+        image_name = self.inputs.get_ci_image() or 'ubuntu-traffic'
+        return self.useFixture(
+            VMFixture(
+                project_name=self.inputs.project_name,
+                connections=self.connections,
+                vn_obj=vn_fixture.obj,
+                vm_name=vm_name,
+                image_name=image_name,
+                flavor=flavor,
+                node_name=node_name))
+
+    @preposttest_wrapper
+    def test_policy_with_spl_char_in_name(self):
+        result = True
+        vn1_name = get_random_name('vn1')
+        vn1_subnets = [get_random_cidr()]
+        vn2_name = get_random_name('vn2')
+        vn2_subnets = [get_random_cidr()]
+
+        policy_name = 'policy1' + gen_str_with_spl_char(10)
+
+        rules = [
+            {
+                'direction': '<>', 'simple_action': 'pass',
+                'protocol': 'any', 'src_ports': 'any',
+                'dst_ports': 'any',
+                'source_network': 'any',
+                'dest_network': 'any',
+            },
+        ]
+
+        policy_fixture = self.useFixture(
+            PolicyFixture(
+                policy_name=policy_name, rules_list=rules, inputs=self.inputs,
+                connections=self.connections))
+        vn1_fixture = self.create_vn(vn1_name, vn1_subnets)
+        vn1_fixture.bind_policies(
+            [policy_fixture.policy_fq_name], vn1_fixture.vn_id)
+        vn2_fixture = self.create_vn(vn2_name, vn2_subnets)
+        vn2_fixture.bind_policies(
+            [policy_fixture.policy_fq_name], vn2_fixture.vn_id)
+
+        self.addCleanup(vn1_fixture.unbind_policies,
+                        vn1_fixture.vn_id, [policy_fixture.policy_fq_name])
+        assert vn1_fixture.verify_on_setup()
+
+        self.addCleanup(vn2_fixture.unbind_policies,
+                        vn2_fixture.vn_id, [policy_fixture.policy_fq_name])
+        assert vn2_fixture.verify_on_setup()
+
+        vn1_vm1_name = get_random_name('vn1_vm1')
+        vn2_vm1_name = get_random_name('vn2_vm1')
+        vm1_fixture = self.create_vm(vn1_fixture, vn1_vm1_name)
+        vm2_fixture = self.create_vm(vn1_fixture, vn2_vm1_name)
+        vm1_fixture.wait_till_vm_is_up()
+        vm2_fixture.wait_till_vm_is_up()
+
+        if not vm1_fixture.ping_to_ip(vm2_fixture.vm_ip):
+            self.logger.error(
+                'Ping from %s to %s failed, expected it to pass' %
+                (vm1_fixture.vm_name, vm2_fixture.vm_name))
+            result = False
+        if not vm2_fixture.ping_to_ip(vm1_fixture.vm_ip):
+            self.logger.error(
+                'Ping from %s to %s failed, expected it to pass' %
+                (vm2_fixture.vm_name, vm1_fixture.vm_name))
+            result = False
+        return result
+
+    # end of class TestSerialPolicy

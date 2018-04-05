@@ -12,18 +12,18 @@ from tcutils.verification_util import *
 from opserver_results import *
 from opserver_util import OpServerUtils
 from tcutils.util import *
-
+from cfgm_common.exceptions import PermissionDenied
 
 class VerificationOpsSrv (VerificationUtilBase):
 
-    def __init__(self, ip, port=8081, logger=LOG):
-        super(VerificationOpsSrv, self).__init__(ip, port, logger=logger)
+    def __init__(self, ip, port=8081, logger=LOG, inputs=None):
+        super(VerificationOpsSrv, self).__init__(ip, port, logger=logger, args=inputs)
 
 
     def get_ops_generator(self, generator=None, 
                         moduleid=None, node_type=None, 
                         instanceid='0'):
-        '''http://nodea29:8081/analytics/generator\
+        '''http://nodea29:8081/analytics/uves/generator\
             /nodea18:Control:Contrail-Control:0?flat'''
         if (generator == None):
             generator = socket.gethostname()
@@ -38,14 +38,15 @@ class VerificationOpsSrv (VerificationUtilBase):
         res = None
         try:
             generator_dict = self.dict_get(
-                'analytics/generator/' + generator + \
+                'analytics/uves/generator/' + generator + \
                 ':' + node_type + ':' + moduleid + ':' \
                 + instanceid + '?flat')
             res = OpGeneratorResult(generator_dict)
+        except PermissionDenied:
+            raise
         except Exception as e:
             print e
-        finally:
-            return res
+        return res
 
     def get_ops_vrouter(self, vrouter=None):
         if (vrouter == None):
@@ -77,7 +78,7 @@ class VerificationOpsSrv (VerificationUtilBase):
         res = None
         try:
             vn_dict = self.dict_get(
-                'analytics/virtual-network/' + vn_fq_name + '?flat')
+                'analytics/uves/virtual-network/' + vn_fq_name + '?flat')
             res = OpVNResult(vn_dict)
         except Exception as e:
             print e
@@ -88,8 +89,19 @@ class VerificationOpsSrv (VerificationUtilBase):
         res = None
         try:
             vm_dict = self.dict_get(
-                'analytics/virtual-machine/' + vm + '?flat')
+                'analytics/uves/virtual-machine/' + vm + '?flat')
             res = OpVMResult(vm_dict)
+        except Exception as e:
+            print e
+        finally:
+            return res
+
+    def get_ops_loadbalancer(self, lb):
+        res = None
+        try:
+            lb_dict = self.dict_get(
+                'analytics/uves/loadbalancer/' + lb + '?flat')
+            res = OpLBResult(lb_dict)
         except Exception as e:
             print e
         finally:
@@ -102,7 +114,7 @@ class VerificationOpsSrv (VerificationUtilBase):
         res = None
         try:
             si_dict = self.dict_get(
-                'analytics/service-instance/' + svc_instance + '?flat')
+                'analytics/uves/service-instance/' + svc_instance + '?flat')
             res = OpSIResult(si_dict)
         except Exception as e:
             print e
@@ -118,7 +130,7 @@ class VerificationOpsSrv (VerificationUtilBase):
         res = None
         try:
             st_dict = self.dict_get(
-                'analytics/service-chain/sc:' + left_vn + \
+                'analytics/uves/service-chain/sc:' + left_vn + \
                         ':' + right_vn + '?flat')
             res = OpSTResult(st_dict)
         except Exception as e:
@@ -129,11 +141,16 @@ class VerificationOpsSrv (VerificationUtilBase):
     def get_hrefs_to_all_UVEs_of_a_given_UVE_type(self, uveType=None):
         '''Get all hrefs for a uve type'''
         if uveType:
-            dct = self.dict_get('analytics/uves/' + uveType)
+            if uveType == 'tables':
+                dct = self.dict_get('analytics/' + uveType)
+            else:
+                dct = self.dict_get('analytics/uves/' + uveType)
         else:
             dct = self.dict_get('analytics/uves')
             
         ret_value = []
+        if not dct:
+            return ret_value
         for elem in dct:
             self.ame = OpHrefResult(elem)
             ret_value.append(self.ame)
@@ -141,12 +158,16 @@ class VerificationOpsSrv (VerificationUtilBase):
     
     def get_hrefs_to_all_tables(self, uveType=None):
         '''Get all hrefs for a uve type'''
-        dct = self.dict_get('analytics/' + uveType)
+        if uveType == 'tables':
+            dct = self.dict_get('analytics/' + uveType)
+        else:
+            dct = self.dict_get('analytics/uves/' + uveType)
         ret_value = []
         for elem in dct:
             self.tme = OpHrefTableResult(elem)
             ret_value.append(self.tme)
         return ret_value
+
 
     def send_trace_to_database(self, node=None, 
                             module=None, instance_id='0', 
@@ -173,12 +194,14 @@ class VerificationOpsSrv (VerificationUtilBase):
         try:
             bgp_node = peer_toupe[0]
             peer = peer_toupe[1]
-            dct = self.dict_get('analytics/uves/bgp-peer\
+            link = 'analytics/uves/bgp-peer\
                             /default-domain:default-project:\
-                            ip-fabric:__default__:' +
+                            ip-fabric:__default__:' +\
                             bgp_node + ':' + 'default-domain:\
                             default-project:ip-fabric:__default__:' \
-                            + peer + '?flat')
+                            + peer + '?flat'
+
+            dct = self.dict_get("".join(link.split()))
             res = OpBGPPeerResult(dct)
         except Exception as e:
             print e
@@ -213,12 +236,36 @@ class VerificationOpsSrv (VerificationUtilBase):
         finally:
             return res
 
+    def get_ops_alarms(self):
+        '''http://nodea18:8081/analytics/alarms'''
+        res = None
+        try:
+            c_dict = self.dict_get(
+                'analytics/alarms')
+            res = OpCollectorResult(c_dict)
+        except Exception as e:
+            print e
+        finally:
+            return res
+
     def get_ops_config(self, config=None):
         '''http://nodea18:8081/analytics/uves/config-node/nodea11?flat'''
         res = None
         try:
             c_dict = self.dict_get(
                 'analytics/uves/config-node/' + config + '?flat')
+            res = OpConfigResult(c_dict)
+        except Exception as e:
+            print e
+        finally:
+            return res
+    
+    def get_ops_dns(self, control=None):
+        '''http://nodea18:8081/analytics/uves/dns-node/nodea11?flat'''
+        res = None
+        try:
+            c_dict = self.dict_get(
+                'analytics/uves/dns-node/' + control + '?flat')
             res = OpConfigResult(c_dict)
         except Exception as e:
             print e
@@ -256,7 +303,7 @@ class VerificationOpsSrv (VerificationUtilBase):
         res = None
         try:
             c_dict = self.dict_get(
-                'analytics/service-chain/*')
+                'analytics/uves/service-chain/*')
             res = OpServiceChainResult(c_dict)
         except Exception as e:
             print e
@@ -267,8 +314,15 @@ class VerificationOpsSrv (VerificationUtilBase):
     def post_query(self, table, start_time=None, end_time=None,
                    select_fields=None,
                    where_clause='',
-                   sort_fields=None, sort=None, limit=None, filter=None, dir=None):
+                   sort_fields=None, sort=None, limit=None, filter=None, dir=None,
+                   session_type=None):
         res = None
+        try:
+            self._drv._auth()
+            headers = self._drv._headers
+        except Exception as e:
+            headers = None #vcenter case where openstack not available
+
         try:
             flows_url = OpServerUtils.opserver_query_url(
                 self._ip, str(self._port))
@@ -277,19 +331,25 @@ class VerificationOpsSrv (VerificationUtilBase):
                 table, start_time, end_time,
                 select_fields,
                 where_clause,
-                sort_fields, sort, limit, filter, dir)
+                sort_fields, sort, limit, filter, dir,
+                session_type)
 
             print json.dumps(query_dict)
             res = []
             resp = OpServerUtils.post_url_http(
-                flows_url, json.dumps(query_dict))
+                flows_url, json.dumps(query_dict), headers)
             if resp is not None:
                 resp = json.loads(resp)
-                qid = resp['href'].rsplit('/', 1)[1]
-                result = OpServerUtils.get_query_result(
-                    self._ip, str(self._port), qid)
-                for item in result:
-                    res.append(item)
+                try:
+                    qid = resp['href'].rsplit('/', 1)[1]
+                    result = OpServerUtils.get_query_result(
+                        self._ip, str(self._port), qid, headers)
+                    for item in result:
+                        res.append(item)
+                except Exception as e:
+                    if 'value' in resp:
+                        for item in resp['value']:
+                            res.append(item)
         except Exception as e:
             print str(e)
         finally:
@@ -316,8 +376,9 @@ class VerificationOpsSrv (VerificationUtilBase):
 
 class VerificationOpsSrvIntrospect (VerificationUtilBase):
 
-    def __init__(self, ip, port, logger=LOG):
-        super(VerificationOpsSrvIntrospect, self).__init__(ip, port,drv=XmlDrv, logger=logger)
+    def __init__(self, ip, port, logger=LOG, inputs=None):
+        super(VerificationOpsSrvIntrospect, self).__init__(ip, port,drv=XmlDrv,
+            logger=logger, args=inputs)
 
     def get_collector_connectivity(self):
         connaction_status = dict()

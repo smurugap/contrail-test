@@ -21,7 +21,7 @@ from floating_ip import *
 from control_node import *
 from policy_test import *
 import test
-
+from tcutils.tcpdump_utils import check_pcap_file_exists
 
 class TestEncapCases(base.BaseEncapTest):
 
@@ -81,7 +81,6 @@ class TestEncapCases(base.BaseEncapTest):
 
             self.project_fixture = self.useFixture(
                 ProjectFixture(
-                    vnc_lib_h=self.vnc_lib,
                     project_name=self.inputs.project_name,
                     connections=self.connections))
             self.logger.info(
@@ -154,17 +153,16 @@ class TestEncapCases(base.BaseEncapTest):
             # TODO Configure MX. Doing Manually For Now
             self.logger.info(
                 "BGP Peer configuraion done and trying to outside the VN cluster")
-            self.logger.info(
-                "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-            assert vm1_fixture.ping_with_certainty('10.206.255.2')
-            self.logger.info("Now trying to ping www-int.juniper.net")
-            self.tcpdump_start_on_all_compute()
+            self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
+            if not self.inputs.pcap_on_vm:
+                self.tcpdump_start_on_all_compute()
             if not vm1_fixture.ping_with_certainty(
-                    'www-int.juniper.net',
+                    self.inputs.public_host,
                     count='15'):
                 result = result and False
             comp_vm1_ip = vm1_fixture.vm_node_ip
-            self.tcpdump_analyze_on_compute(comp_vm1_ip, 'GRE')
+            if not self.inputs.pcap_on_vm:
+                self.tcpdump_analyze_on_compute(comp_vm1_ip, 'GRE')
             fip_fixture.disassoc_and_delete_fip(fip_id)
             if not result:
                 self.logger.error(
@@ -180,7 +178,7 @@ class TestEncapCases(base.BaseEncapTest):
         return True
     # end test_encaps_mx_gateway
 
-    @test.attr(type=[ 'serial', 'sanity' ])
+    @test.attr(type=[ 'serial', 'sanity', 'vcenter' ])
     @preposttest_wrapper
     def test_apply_policy_fip_on_same_vn_gw_mx(self):
         '''A particular VN is configure with policy to talk accross VN's and FIP to access outside'''
@@ -188,7 +186,7 @@ class TestEncapCases(base.BaseEncapTest):
         if (('MX_GW_TEST' in os.environ) and (
                 os.environ.get('MX_GW_TEST') == '1')):
 
-            if len(self.connections.nova_h.get_hosts()) < 2:
+            if len(self.connections.orch.get_hosts()) < 2:
                 self.logger.info(
                     "Skipping Test. At least 2 compute node required to run the test")
                 raise self.skipTest(
@@ -236,7 +234,6 @@ class TestEncapCases(base.BaseEncapTest):
 
             self.project_fixture = self.useFixture(
                 ProjectFixture(
-                    vnc_lib_h=self.vnc_lib,
                     project_name=self.inputs.project_name,
                     connections=self.connections))
             self.logger.info(
@@ -246,7 +243,7 @@ class TestEncapCases(base.BaseEncapTest):
                 self.inputs.project_name, 'default')
 
             # Get all compute host
-            host_list = self.connections.nova_h.get_hosts()
+            host_list = self.connections.orch.get_hosts()
 
             fvn_fixture = self.useFixture(
                 VNFixture(
@@ -392,13 +389,10 @@ class TestEncapCases(base.BaseEncapTest):
 
             self.logger.info(
                 'Checking connectivity outside VNS cluster through FIP')
-            self.logger.info(
-                "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-            assert vm1_fixture.ping_with_certainty('10.206.255.2')
-            self.logger.info("Now trying to ping www-int.juniper.net")
+            self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
             self.tcpdump_start_on_all_compute()
             if not vm1_fixture.ping_with_certainty(
-                    'www-int.juniper.net',
+                    self.inputs.public_host,
                     count='15'):
                 result = result and False
             comp_vm1_ip = vm1_fixture.vm_node_ip
@@ -473,7 +467,6 @@ class TestEncapCases(base.BaseEncapTest):
 
             self.project_fixture = self.useFixture(
                 ProjectFixture(
-                    vnc_lib_h=self.vnc_lib,
                     project_name=self.inputs.project_name,
                     connections=self.connections))
             self.logger.info(
@@ -629,13 +622,10 @@ class TestEncapCases(base.BaseEncapTest):
 
             self.logger.info(
                 'Checking connectivity outside VNS cluster through FIP')
-            self.logger.info(
-                "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-            assert vm1_fixture.ping_with_certainty('10.206.255.2')
-            self.logger.info("Now trying to ping www-int.juniper.net")
+            self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
             self.tcpdump_start_on_all_compute()
             if not vm1_fixture.ping_with_certainty(
-                    'www-int.juniper.net',
+                    self.inputs.public_host,
                     count='15'):
                 result = result and False
             comp_vm1_ip = vm1_fixture.vm_node_ip
@@ -665,13 +655,10 @@ class TestEncapCases(base.BaseEncapTest):
 
             self.logger.info(
                 'Checking connectivity outside VNS cluster through FIP')
-            self.logger.info(
-                "Checking the basic routing. Pinging known local IP bng2-core-gw1.jnpr.net")
-            assert vm1_fixture.ping_with_certainty('10.206.255.2')
-            self.logger.info("Now trying to ping www-int.juniper.net")
+            self.logger.info("Now trying to ping %s" % (self.inputs.public_host))
             self.tcpdump_start_on_all_compute()
             if not vm1_fixture.ping_with_certainty(
-                    'www-int.juniper.net',
+                    self.inputs.public_host,
                     count='15'):
                 result = result and False
             comp_vm1_ip = vm1_fixture.vm_node_ip
@@ -691,9 +678,11 @@ class TestEncapCases(base.BaseEncapTest):
 
 # end TestEncapsulation
 #
-    def start_tcpdump(self, session, cmd):
+    def start_tcpdump(self, session, cmd, pcap=None):
         self.logger.info("Starting tcpdump to capture the packets.")
         result = execute_cmd(session, cmd, self.logger)
+        if pcap:
+            assert check_pcap_file_exists(session, pcap),'pcap not got created'
    # end start_tcpdump
 
     def stop_tcpdump(self, session):
@@ -713,13 +702,13 @@ class TestEncapCases(base.BaseEncapTest):
             self.stop_tcpdump(session)
             inspect_h = self.agent_inspect[compute_ip]
             comp_intf = inspect_h.get_vna_interface_by_type('eth')
-            if len(comp_intf) == 1:
+            if len(comp_intf) >= 1:
                 comp_intf = comp_intf[0]
             self.logger.info('Agent interface name: %s' % comp_intf)
             pcap1 = '/tmp/encap-udp.pcap'
             pcap2 = '/tmp/encap-gre.pcap'
             pcap3 = '/tmp/encap-vxlan.pcap'
-            cmd1 = 'tcpdump -ni %s udp port 51234 -w %s -s 0' % (
+            cmd1 = 'tcpdump -ni %s udp port 6635 -w %s -s 0' % (
                 comp_intf, pcap1)
             cmd_udp = "nohup " + cmd1 + " >& /dev/null < /dev/null &"
             cmd2 = 'tcpdump -ni %s proto 47 -w %s -s 0' % (comp_intf, pcap2)
@@ -728,10 +717,11 @@ class TestEncapCases(base.BaseEncapTest):
                 comp_intf, pcap3)
             cmd_vxlan = "nohup " + cmd3 + " >& /dev/null < /dev/null &"
 
-            self.start_tcpdump(session, cmd_udp)
-            self.start_tcpdump(session, cmd_gre)
-            self.start_tcpdump(session, cmd_vxlan)
-
+            self.start_tcpdump(session, cmd_udp, pcap1)
+            self.start_tcpdump(session, cmd_gre, pcap2)
+            self.start_tcpdump(session, cmd_vxlan, pcap3)
+        #just to make sure tcpdump starts listening
+        sleep(5)
     # end tcpdump_on_all_compute
 
     def tcpdump_stop_on_all_compute(self):

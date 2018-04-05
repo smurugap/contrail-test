@@ -15,8 +15,12 @@ from traffic.core.helpers import Sender, Receiver
 from base import BaseVnVmTest
 from common import isolated_creds
 import inspect
-
+from tcutils.util import skip_because, is_almost_same
+from tcutils.tcpdump_utils import start_tcpdump_for_intf,\
+     stop_tcpdump_for_intf, verify_tcpdump_count
 import test
+from tcutils.contrail_status_check import ContrailStatusChecker
+from tcutils.traffic_utils.hping_traffic import Hping3
 
 class TestBasicVMVN0(BaseVnVmTest):
 
@@ -29,6 +33,7 @@ class TestBasicVMVN0(BaseVnVmTest):
         super(TestBasicVMVN0, cls).tearDownClass()
     
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_bring_up_vm_with_control_node_down(self):
         '''
         Description: Create VM when there is not active control node. Verify VM comes up fine when all control nodes are back
@@ -60,9 +65,11 @@ class TestBasicVMVN0(BaseVnVmTest):
         # Stop all the control node
         for entry in controller_list:
             self.logger.info('Stoping the Control service in  %s' % (entry))
-            self.inputs.stop_service('contrail-control', [entry])
+            self.inputs.stop_service('contrail-control', [entry],
+                                     container='control')
             self.addCleanup(self.inputs.start_service,
-                            'contrail-control', [entry])
+                            'contrail-control', [entry],
+                            container='control')
         sleep(30)
 
         vn1_vm1_name = get_random_name('vm1')
@@ -116,7 +123,9 @@ class TestBasicVMVN0(BaseVnVmTest):
         for entry in self.inputs.compute_ips:
             inspect_h = self.agent_inspect[entry]
             self.logger.info('Checking VN info in agent %s.' % (entry))
-            if inspect_h.get_vna_vn_list()['VNs'] != []:
+            if inspect_h.get_vna_vn(domain=self.project.domain_name, 
+                           project=self.project.project_name, 
+                           vn_name=vn1_fixture.vn_name):
                 self.logger.error(
                     'Agent should not have any VN info present when control node is down')
                 result = result and False
@@ -124,7 +133,8 @@ class TestBasicVMVN0(BaseVnVmTest):
         # Start all the control node
         for entry in controller_list:
             self.logger.info('Starting the Control service in  %s' % (entry))
-            self.inputs.start_service('contrail-control', [entry])
+            self.inputs.start_service('contrail-control', [entry],
+                                      container='control')
         sleep(10)
 
         self.logger.info('Checking the VM came up properly or not')
@@ -143,6 +153,7 @@ class TestBasicVMVN0(BaseVnVmTest):
     # end test_bring_up_vm_with_control_node_down
     
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_ipam_persistence_across_restart_reboots(self):
         '''
         Description: Test to validate IPAM persistence across restarts and reboots of nodes.
@@ -153,7 +164,7 @@ class TestBasicVMVN0(BaseVnVmTest):
         Pass criteria: The VMs should be back to ACTIVE state and the ping between them should PASS.
         Maintainer : ganeshahv@juniper.net
         '''
-        ipam_obj=self.useFixture( IPAMFixture(project_obj= self.project, name = get_random_name('my-ipam')))
+        ipam_obj=self.useFixture( IPAMFixture(connections= self.connections, name = get_random_name('my-ipam')))
         assert ipam_obj.verify_on_setup()
 
         ts = time.time()
@@ -172,23 +183,27 @@ class TestBasicVMVN0(BaseVnVmTest):
 
         self.nova_h.wait_till_vm_is_up( vm1_fixture.vm_obj )
         self.nova_h.wait_till_vm_is_up( vm2_fixture.vm_obj )
-        assert vm1_fixture.ping_to_ip( vm2_fixture.vm_ip )
+        assert vm1_fixture.ping_with_certainty(vm2_fixture.vm_ip)
         self.logger.info('Will restart the services now')
         for compute_ip in self.inputs.compute_ips:
-            pass
-            self.inputs.restart_service('contrail-vrouter-agent',[compute_ip])
+            self.inputs.restart_service('contrail-vrouter-agent',[compute_ip],
+                                        container='agent')
         for bgp_ip in self.inputs.bgp_ips:
-            self.inputs.restart_service('contrail-control',[bgp_ip])
-            pass
-        sleep(30)
+            self.inputs.restart_service('contrail-control',[bgp_ip],
+                                        container='control')
 
+        cluster_status, error_nodes = ContrailStatusChecker().wait_till_contrail_cluster_stable()
+        assert cluster_status, 'Cluster is not stable after restart'
         self.logger.info('Will check if the ipam persists and ping b/w VMs is still successful')
-
-        assert ipam_obj
-        assert vm1_fixture.ping_to_ip( vm2_fixture.vm_ip )
+        assert ipam_obj.verify_on_setup()
+        msg = 'VM verification failed after process restarts'
+        assert vm1_fixture.verify_on_setup(), msg
+        assert vm2_fixture.verify_on_setup(), msg
+        assert vm1_fixture.ping_with_certainty(vm2_fixture.vm_ip)
         return True
     
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_multistep_vm_add_delete_with_stop_start_service(self):
         '''
         Description: Test to validate VMs addition deletion after service restarts.
@@ -213,26 +228,29 @@ class TestBasicVMVN0(BaseVnVmTest):
         vm1_fixture = VMFixture(connections=self.connections,
                                 vn_obj=vn_obj, vm_name=get_random_name('vm1') , project_name=self.inputs.project_name)
         vm1_fixture.setUp()
-        vm1_fixture.verify_vm_launched()
+        assert vm1_fixture.verify_vm_launched()
 
         self.logger.info('vm1 launched successfully.Stopping vrouter service')
         for compute_ip in self.inputs.compute_ips:
-            self.inputs.stop_service('contrail-vrouter-agent', [compute_ip])
+            self.inputs.stop_service('contrail-vrouter-agent', [compute_ip],
+                                     container='agent')
             self.addCleanup(self.inputs.start_service,
-                            'contrail-vrouter-agent', [compute_ip])
+                            'contrail-vrouter-agent', [compute_ip],
+                            container='agent')
         self.logger.info('Trying to delete vm1')
         assert not vm1_fixture.cleanUp()
         self.logger.info(
             'vm1 is not deleted as expected.Trying to launch a new VM vm2')
         vm2_fixture = self.useFixture(VMFixture(connections=self.connections,
                                                 vn_obj=vn_obj, vm_name = get_random_name ('vm2'), project_name=self.inputs.project_name))
-        vm2_fixture.verify_vm_launched()
+        assert vm2_fixture.verify_vm_launched()
         self.logger.info('Checking if vm2 has booted up')
         assert not self.nova_h.wait_till_vm_is_up(vm2_fixture.vm_obj)
         self.logger.info(
             'vm2 has not booted up as expected.Starting vrouter service')
         for compute_ip in self.inputs.compute_ips:
-            self.inputs.start_service('contrail-vrouter-agent', [compute_ip])
+            self.inputs.start_service('contrail-vrouter-agent', [compute_ip],
+                                      container='agent')
         vm2_fixture.wait_till_vm_is_up()
         self.logger.info('vm2 is up now as expected')
         assert vm2_fixture.verify_on_setup()
@@ -241,6 +259,7 @@ class TestBasicVMVN0(BaseVnVmTest):
     # end test_multistep_vm_add_delete_with_stop_start_service
     
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_multistep_vm_delete_with_stop_start_service(self):
         '''
         Description: Test to validate VM's deletion attempt fails when the contrail-vrouter-agent service is down.
@@ -267,21 +286,25 @@ class TestBasicVMVN0(BaseVnVmTest):
         vm1_fixture.verify_vm_launched()
         self.logger.info('VM launched successfully.Stopping vrouter service')
         for compute_ip in self.inputs.compute_ips:
-            self.inputs.stop_service('contrail-vrouter-agent', [compute_ip])
+            self.inputs.stop_service('contrail-vrouter-agent', [compute_ip],
+                                     container='agent')
         #    self.addCleanup( sleep(10))
             self.addCleanup(self.inputs.start_service,
-                            'contrail-vrouter-agent', [compute_ip])
+                            'contrail-vrouter-agent', [compute_ip],
+                            container='agent')
         self.logger.info('Trying to delete the VM')
         assert not vm1_fixture.cleanUp()
         self.logger.info('VM is not deleted as expected')
         for compute_ip in self.inputs.compute_ips:
             self.logger.info('Starting Vrouter Service')
-            self.inputs.start_service('contrail-vrouter-agent', [compute_ip])
+            self.inputs.start_service('contrail-vrouter-agent', [compute_ip],
+                                      container='agent')
             sleep(10)
         return True
     # end test_multistep_vm_delete_with_stop_start_service
     
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter')
     def test_nova_com_sch_restart_with_multiple_vn_vm(self):
         '''
         Description: Test to validate that multiple VM creation and deletion after service restarts.
@@ -294,14 +317,14 @@ class TestBasicVMVN0(BaseVnVmTest):
         vm1_name = get_random_name('vm_mine')
         vn_name = get_random_name('vn222')
         vn_subnets = ['11.1.1.0/24']
-        vn_count_for_test = 32
+        vn_count_for_test = 20
         if (len(self.inputs.compute_ips) == 1):
             vn_count_for_test = 5
         vm_fixture = self.useFixture(
             create_multiple_vn_and_multiple_vm_fixture(
                 connections=self.connections,
                 vn_name=vn_name, vm_name=vm1_name, inputs=self.inputs, project_name=self.inputs.project_name,
-                subnets=vn_subnets, vn_count=vn_count_for_test, vm_count=1, subnet_count=1, image_name='cirros-0.3.0-x86_64-uec',
+                subnets=vn_subnets, vn_count=vn_count_for_test, vm_count=1, subnet_count=1, image_name='cirros',
                 flavor='m1.tiny'))
         time.sleep(100)
         try:
@@ -315,15 +338,17 @@ class TestBasicVMVN0(BaseVnVmTest):
             vm_host_ip = vmobj.vm_node_ip
             if vm_host_ip not in compute_ip:
                 compute_ip.append(vm_host_ip)
-        self.inputs.restart_service('openstack-nova-compute', compute_ip)
-        self.inputs.restart_service('openstack-nova-scheduler', compute_ip)
+        self.inputs.restart_service('openstack-nova-compute', compute_ip,
+                                    container='nova-compute')
+        self.inputs.restart_service('openstack-nova-scheduler', compute_ip,
+                                    container='nova-scheduler')
         sleep(30)
         for vmobj in vm_fixture.vm_obj_dict.values():
             assert vmobj.verify_on_setup()
         return True
     # end test_nova_com_sch_restart_with_multiple_vn_vm
 
-    @retry(delay=10, tries=30)
+    @retry(delay=5, tries=30)
     def verification_after_process_restart_in_policy_between_vns(self):
         result=True
         try:
@@ -334,8 +359,9 @@ class TestBasicVMVN0(BaseVnVmTest):
             result=False
         return result
     
-    @test.attr(type=['sanity'])
+    @test.attr(type=['cb_sanity', 'sanity'])
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_process_restart_in_policy_between_vns(self):
         ''' Test to validate that with policy having rule to check icmp fwding between VMs on different VNs , ping between VMs should pass
         with process restarts
@@ -377,13 +403,13 @@ class TestBasicVMVN0(BaseVnVmTest):
                 policy_name=policy2_name, 
                 rules_list=rev_rules, inputs=self.inputs,
                 connections=self.connections))
-        vn1_fixture = self.create_vn(vn1_name, vn1_subnets,option = 'api')
+        vn1_fixture = self.create_vn(vn1_name, vn1_subnets, option='contrail')
         assert vn1_fixture.verify_on_setup()
         vn1_fixture.bind_policies(
             [policy1_fixture.policy_fq_name], vn1_fixture.vn_id)
         self.addCleanup(vn1_fixture.unbind_policies,
                         vn1_fixture.vn_id, [policy1_fixture.policy_fq_name])
-        vn2_fixture = self.create_vn(vn2_name, vn2_subnets, option = 'api')
+        vn2_fixture = self.create_vn(vn2_name, vn2_subnets, option='contrail')
         assert vn2_fixture.verify_on_setup()
         vn2_fixture.bind_policies(
             [policy2_fixture.policy_fq_name], vn2_fixture.vn_id)
@@ -398,18 +424,22 @@ class TestBasicVMVN0(BaseVnVmTest):
         assert vm1_fixture.ping_with_certainty(vm2_fixture.vm_ip)
 
         for compute_ip in self.inputs.compute_ips:
-            pass		
-            self.inputs.restart_service('contrail-vrouter-agent', [compute_ip])
+            self.inputs.restart_service('contrail-vrouter-agent', [compute_ip],
+                                        container='agent')
         for bgp_ip in self.inputs.bgp_ips:
-            pass
-            self.inputs.restart_service('contrail-control', [bgp_ip])
+            self.inputs.restart_service('contrail-control', [bgp_ip],
+                                        container='control')
         for cfgm_ip in self.inputs.cfgm_ips:
-            pass
-            self.inputs.restart_service('contrail-api', [cfgm_ip])
+            self.inputs.restart_service('contrail-api', [cfgm_ip],
+                                        container='api-server')
 
-        self.verification_after_process_restart_in_policy_between_vns()
-        self.logger.info('Sleeping for a min.')
-        sleep(60)
+        # Wait for cluster to be stable
+        cs_obj = ContrailStatusChecker(self.inputs)
+        clusterstatus, error_nodes = cs_obj.wait_till_contrail_cluster_stable()
+        assert clusterstatus, (
+            'Hash of error nodes and services : %s' % (error_nodes))
+
+        assert self.verification_after_process_restart_in_policy_between_vns()
         for cfgm_name in self.inputs.cfgm_names:
             assert self.analytics_obj.verify_cfgm_uve_module_state\
                         (self.inputs.collector_names[0],
@@ -420,7 +450,7 @@ class TestBasicVMVN0(BaseVnVmTest):
 
         vn3_name = get_random_name('vn3')
         vn3_subnets = ["192.168.4.0/24"]
-        vn3_fixture = self.create_vn(vn3_name, vn3_subnets,option = 'api')
+        vn3_fixture = self.create_vn(vn3_name, vn3_subnets, option='contrail')
         assert vn1_fixture.verify_on_setup()
 
         vm3_fixture = self.create_vm(vn1_fixture, vn1_vm2_name)
@@ -433,8 +463,8 @@ class TestBasicVMVN0(BaseVnVmTest):
 
 # end test_process_restart_in_policy_between_vns
     
-    @test.attr(type=['sanity', 'ci_sanity_WIP'])
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_process_restart_with_multiple_vn_vm(self):
         '''
         Description: Test to validate that multiple VM creation and deletion after service restarts.
@@ -447,16 +477,16 @@ class TestBasicVMVN0(BaseVnVmTest):
         vm1_name = 'vm_mine'
         vn_name = 'vn222'
         vn_subnets = ['11.1.1.0/24']
-        vn_count_for_test = 32
+        vn_count_for_test = 20
         if (len(self.inputs.compute_ips) == 1):
             vn_count_for_test = 10
-        if os.environ.has_key('ci_image'):
+        if self.inputs.is_ci_setup():
             vn_count_for_test = 3
         vm_fixture = self.useFixture(
             create_multiple_vn_and_multiple_vm_fixture(
                 connections=self.connections,
                 vn_name=vn_name, vm_name=vm1_name, inputs=self.inputs, project_name=self.inputs.project_name,
-                subnets=vn_subnets, vn_count=vn_count_for_test, vm_count=1, subnet_count=1, image_name='cirros-0.3.0-x86_64-uec',
+                subnets=vn_subnets, vn_count=vn_count_for_test, vm_count=1, subnet_count=1, image_name='cirros',
                 flavor='m1.tiny'))
         time.sleep(100)
         try:
@@ -469,7 +499,8 @@ class TestBasicVMVN0(BaseVnVmTest):
             vm_host_ip = vmobj.vm_node_ip
             if vm_host_ip not in compute_ip:
                 compute_ip.append(vm_host_ip)
-        self.inputs.restart_service('contrail-vrouter-agent', compute_ip)
+        self.inputs.restart_service('contrail-vrouter-agent', compute_ip,
+									container='agent')
         sleep(50)
         for vmobj in vm_fixture.vm_obj_dict.values():
             assert vmobj.verify_on_setup()
@@ -477,6 +508,7 @@ class TestBasicVMVN0(BaseVnVmTest):
     #end test_process_restart_with_multiple_vn_vm
     
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_kill_service_verify_core_generation(self):
         '''
         Description: Test to Validate core is generated for services on SIGQUIT
@@ -507,27 +539,30 @@ class TestBasicVMVN0(BaseVnVmTest):
             'contrail-query-engine': 'collector',
             'contrail-collector': 'collector',
             'contrail-analytics-api': 'collector',
-            'contrail-discovery': 'cfgm',
             'contrail-api': 'cfgm',
             'contrail-svc-monitor': 'cfgm'
         }
 
         for service, role in service_list.iteritems():
-            cmd = "service %s status |  awk '{print $4}' | cut -f 1 -d','" % service
+            cmd = 'service %s status |  awk \"{print $4}\" | cut -f 1 -d\',\'' % service
             self.logger.info("service:%s, role:%s" % (service, role))
             if role == 'cfgm':
+                container = 'controller'
                 login_ip = cfgm_ip
                 login_user = cfgm_user
                 login_pwd = cfgm_pwd
             elif role == 'compute':
+                container = 'compute'
                 login_ip = compute_ip
                 login_user = compute_user
                 login_pwd = compute_pwd
             elif role == 'control':
+                container = 'controller'
                 login_ip = control_ip
                 login_user = control_user
                 login_pwd = control_pwd
             elif role == 'collector':
+                container = 'analytics'
                 login_ip = collector_ip
                 login_user = collector_user
                 login_pwd = collector_pwd
@@ -537,28 +572,37 @@ class TestBasicVMVN0(BaseVnVmTest):
                 assert result, "Invalid role:%s specified for service:%s" % (
                     role, service)
 
-            with settings(host_string='%s@%s' % (login_user, login_ip),
-                          password=login_pwd, warn_only=True, abort_on_prompts=False):
-                pid = run(cmd)
-                self.logger.info("service:%s, pid:%s" % (service, pid))
-                run('kill -3 %s' % pid)
-                sleep(10)
-                if "No such file or directory" in run("ls -lrt /var/crashes/core.*%s*" % (pid)):
-                    self.logger.error(
-                        "core is not generated for service:%s" % service)
-                    err_msg.append("core is not generated for service:%s" %
-                                   service)
-                    result = result and False
-                else:
-                    # remove core after generation
-                    run("rm -f /var/crashes/core.*%s*" % (pid))
+            pid = self.inputs.run_cmd_on_server(login_ip,cmd,login_user,
+                                                   login_pwd,container=container)
+            pid = int(pid.split(' ')[-1])
+            self.logger.info("service:%s, pid:%s" % (service, pid))
+            cmd1 = 'kill -3 %s' % pid
+            output = self.inputs.run_cmd_on_server(login_ip,cmd1,login_user,
+                                                   login_pwd,container=container)
+            cmd_list_cores = "ls -lrt /var/crashes/core.*%s*" % (pid)
+            
+            sleep(10)
+            output =  self.inputs.run_cmd_on_server(login_ip,cmd_list_cores,login_user,
+                                                   login_pwd,container=container)
+            if "No such file or directory" in output:
+                self.logger.error(
+                    "core is not generated for service:%s" % service)
+                err_msg.append("core is not generated for service:%s" %
+                               service)
+                result = result and False
+            else:
+                # remove core after generation
+                cmd_rm_cores = "rm -f /var/crashes/core.*%s*" % (pid)
+                output =  self.inputs.run_cmd_on_server(login_ip,cmd_rm_cores,login_user,
+                                                   login_pwd,container=container)
         assert result, "core generation validation test failed: %s" % err_msg
         return True
     # end test_kill_service_verify_core_generation
 
 
-    @test.attr(type=['sanity'])
+    @test.attr(type=['cb_sanity', 'sanity'])
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_control_node_switchover(self):
         ''' Stop the control node and check peering with agent fallback to other control node.
             1. Pick one VN from respource pool which has 2 VM's in it
@@ -606,7 +650,8 @@ class TestBasicVMVN0(BaseVnVmTest):
         self.logger.info('Stoping the Control service in  %s' %
                          (active_controller_host_ip))
         self.inputs.stop_service(
-            'contrail-control', [active_controller_host_ip])
+            'contrail-control', [active_controller_host_ip],
+            container='control')
         sleep(5)
 
         # Check the control node shifted to other control node
@@ -637,7 +682,8 @@ class TestBasicVMVN0(BaseVnVmTest):
         self.logger.info('Starting the Control service in  %s' %
                          (active_controller_host_ip))
         self.inputs.start_service(
-            'contrail-control', [active_controller_host_ip])
+            'contrail-control', [active_controller_host_ip],
+            container='control')
 
         # Check the BGP peering status from the currently active control node
         sleep(5)
@@ -650,6 +696,8 @@ class TestBasicVMVN0(BaseVnVmTest):
                     'With Peer %s peering is not Established. Current State %s ' %
                     (entry['peer'], entry['state']))
 
+        assert vm1_fixture.verify_on_setup(), 'VM Verification failed'
+        assert vm2_fixture.verify_on_setup(), 'VM Verification failed'
         # Check the ping
         self.logger.info('Checking the ping between the VM again')
         assert vm1_fixture.ping_to_ip(vm2_fixture.vm_ip)
@@ -662,44 +710,48 @@ class TestBasicVMVN0(BaseVnVmTest):
 
     # end test_control_node_switchover
 
-    @test.attr(type=['sanity'])
     @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter',address_family = 'v6')
     def test_max_vm_flows(self):
         ''' Test to validate setting up of the max_vm_flows parameter in agent
             config file has expected effect on the flows in the system.
-            1. Set VM flow cache time and max_vm_flows to 0.01% of max system
-               flows(512K).
+            1. Set VM flow cache time and max_vm_flows to 0.1% of max system
+               flows(512K) i.e about 500 flows
             2. Create 2 VN's and connect them using a policy.
             3. Launch 2 VM's in the respective VN's.
-            4. Start traffic with around 20000 flows.
-            6. Restart vrouter agent service and check the flows are limited
-               0.01% of max system flows.
-        Pass criteria: Step 6 should pass
+            4. Start traffic with connections exceeding the VM flow limit
+            5. Check the flows are limited to about 500 flows
         '''
         result = True
 
-        # Set VM flow cache time to 30 and max_vm_flows to 0.1% of max system
+        # Set VM flow cache time to 20 and max_vm_flows to 0.1% of max system
         # flows(512K).
-        self.comp_node_fixt = {}
-        self.flow_cache_timeout = 10
-        self.max_system_flows = 0
-        self.max_vm_flows = 0.01
-        for cmp_node in self.inputs.compute_ips:
-            self.comp_node_fixt[cmp_node] = self.useFixture(ComputeNodeFixture(
+        comp_node_fixt = {}
+        flow_cache_timeout = 20
+        max_system_flows = 0
+        max_vm_flows = 0.1
+        compute_ips = [self.inputs.compute_ips[0], self.inputs.compute_ips[0]]
+        compute_names = [self.inputs.compute_names[0], self.inputs.compute_names[0]]
+        if len(self.inputs.compute_ips) > 1:
+            compute_ips[1] = self.inputs.compute_ips[1]
+            compute_names[1] = self.inputs.compute_names[1]
+
+        for cmp_node in compute_ips:
+            comp_node_fixt[cmp_node] = self.useFixture(ComputeNodeFixture(
                 self.connections, cmp_node))
-            self.comp_node_fixt[cmp_node].set_flow_aging_time(
-                self.flow_cache_timeout)
-            self.comp_node_fixt[cmp_node].get_config_per_vm_flow_limit()
-            self.comp_node_fixt[cmp_node].set_per_vm_flow_limit(
-                self.max_vm_flows)
-            self.comp_node_fixt[cmp_node].sup_vrouter_process_restart()
-            if self.max_system_flows < self.comp_node_fixt[
+            comp_node_fixt[cmp_node].set_flow_aging_time(
+                flow_cache_timeout)
+            comp_node_fixt[cmp_node].get_config_per_vm_flow_limit()
+            comp_node_fixt[cmp_node].set_per_vm_flow_limit(
+                max_vm_flows)
+            comp_node_fixt[cmp_node].sup_vrouter_process_restart()
+            if max_system_flows < comp_node_fixt[
                 cmp_node].max_system_flows:
-                self.max_system_flows = self.comp_node_fixt[
+                max_system_flows = comp_node_fixt[
                     cmp_node].max_system_flows
         self.addCleanup(self.cleanup_test_max_vm_flows_vrouter_config,
-            self.inputs.compute_ips,
-            self.comp_node_fixt)
+            compute_ips,
+            comp_node_fixt)
 
         # Define resources for this test.
         vn1_name = get_random_name('VN1')
@@ -755,88 +807,784 @@ class TestBasicVMVN0(BaseVnVmTest):
 
         # Launch 2 VM's in the respective VN's.
         vm1_fixture = self.create_vm(vn1_fixture,vm_name=vn1_vm1_name,
-                flavor='contrail_flavor_small', image_name='ubuntu-traffic')
+                flavor='contrail_flavor_small', image_name='ubuntu-traffic',
+                node_name=compute_names[0])
         vm2_fixture = self.create_vm(vn2_fixture,vm_name=vn2_vm2_name,
-                flavor='contrail_flavor_small', image_name='ubuntu-traffic')
-        assert vm1_fixture.verify_on_setup(), 'VM1 verifications FAILED'
-        assert vm2_fixture.verify_on_setup(), 'VM2 verifications FAILED'
+                flavor='contrail_flavor_small', image_name='ubuntu-traffic',
+                node_name=compute_names[1])
         assert vm1_fixture.wait_till_vm_is_up(), 'VM1 does not seem to be up'
         assert vm2_fixture.wait_till_vm_is_up(), 'VM2 does not seem to be up'
-        assert vm1_fixture.ping_with_certainty(vm2_fixture.vm_ip), \
+        assert vm1_fixture.ping_with_certainty(vm2_fixture.vm_ip, count=1), \
             'Ping from VM1 to VM2 FAILED'
 
         # Set num_flows to fixed, smaller value but > 1% of
         # system max flows
-        max_system_flows = self.max_system_flows
-        vm_flow_limit = int((self.max_vm_flows/100.0)*max_system_flows)
+        max_system_flows = max_system_flows
+        vm_flow_limit = int((max_vm_flows/100.0)*max_system_flows)
         num_flows = vm_flow_limit + 30
-        generated_flows = 2*num_flows
-        flow_gen_rate = 5
+        interval = 'u10000'
         proto = 'udp'
+        # Try UDP echo 
+        dest_port = 7
 
-        # Start Traffic.
-        self.traffic_obj = self.useFixture(
-            traffic_tests.trafficTestFixture(self.connections))
-        startStatus = self.traffic_obj.startTraffic(
-            total_single_instance_streams=int(num_flows),
-            pps=flow_gen_rate,
-            start_sport=5000,
-            cfg_profile='ContinuousSportRange',
-            tx_vm_fixture=vm1_fixture,
-            rx_vm_fixture=vm2_fixture,
-            stream_proto=proto)
-        msg1 = "Status of start traffic : %s, %s, %s" % (
-            proto, vm1_fixture.vm_ip, startStatus['status'])
-        self.logger.info(msg1)
-        assert startStatus['status'], msg1
-        self.logger.info("Wait for 3 sec for flows to be setup.")
-        sleep(3)
+        hping_h = Hping3(vm1_fixture, vm2_fixture.vm_ip,
+                         destport=dest_port,
+                         count=num_flows,
+                         interval=interval,
+                         udp=True)
+        time.sleep(flow_cache_timeout*2)
+        # No need to stop hping
+        hping_h.start(wait=False)
+        time.sleep(5)
 
-        # 4. Poll live traffic & verify VM flow count
-        flow_cmd = 'flow -l | grep %s -A1 |' % vm1_fixture.vm_ip
-        flow_cmd = flow_cmd + ' grep "Action" | grep -v "Action:D(FlowLim)" | wc -l'
-        sample_time = 2
-        vm_flow_list=[]
-        for i in range(5):
-            sleep(sample_time)
-            vm_flow_record = self.inputs.run_cmd_on_server(
-                vm1_fixture.vm_node_ip,
-                flow_cmd,
-                self.inputs.host_data[vm1_fixture.vm_node_ip]['username'],
-                self.inputs.host_data[vm1_fixture.vm_node_ip]['password'])
-            vm_flow_record = vm_flow_record.strip()
-            vm_flow_list.append(int(vm_flow_record))
-            self.logger.info("%s iteration DONE." % i)
-            self.logger.info("VM flow count = %s." % vm_flow_list[i])
-            self.logger.info("Sleeping for %s sec before next iteration."
-                % sample_time)
-
-        vm_flow_list.sort(reverse=True)
-        if vm_flow_list[0] > int(1.1*vm_flow_limit):
-            self.logger.error("TEST FAILED.")
-            self.logger.error("VM flow count seen is greater than configured.")
-            result = False
-        elif vm_flow_list[0] < int(0.9*vm_flow_limit):
-            self.logger.error("TEST FAILED.")
-            self.logger.error("VM flow count seen is much lower than config.")
-            self.logger.error("Something is stopping flow creation. Please debug")
-            result = False
-        else:
-            self.logger.info("TEST PASSED")
-            self.logger.info("Expected range of vm flows seen.")
-            self.logger.info("Max VM flows = %s" % vm_flow_list[0])
-
-        # Stop Traffic.
-        self.logger.info("Proceed to stop traffic..")
-        try:
-            self.traffic_obj.stopTraffic(wait_for_stop=False)
-        except:
-            self.logger.warn("Failed to get a VM handle and stop traffic.")
-
-        self.logger.info("Wait for the flows to get purged.")
-        sleep(self.flow_cache_timeout)
-
-        return result
+        computes = [comp_node_fixt[vm1_fixture.vm_node_ip],
+                    comp_node_fixt[vm2_fixture.vm_node_ip]]
+        for compute in computes:
+            (fwd_flow_cnt, rev_flow_cnt) = compute.get_flow_count(
+                source_ip=vm1_fixture.vm_ip,
+                dest_ip=vm2_fixture.vm_ip,
+                dest_port=dest_port,
+                proto=proto)
+            current_flow_cnt = fwd_flow_cnt + rev_flow_cnt
+            msg = 'VM flow count : Expected:%s, Seen: %s' % (vm_flow_limit,
+                                                           current_flow_cnt)
+            assert is_almost_same(current_flow_cnt, vm_flow_limit, 25), msg
+            self.logger.info('On compute %s, %s..OK' % (compute.ip, msg))
     # end test_max_vm_flows
 
+    @test.attr(type=['sanity', 'vcenter_compute', 'vcenter'])
+    @preposttest_wrapper
+    def test_underlay_broadcast_traffic_handling(self):
+        ''' Test the underlay brocast traffic handling by vrouter. (Bug-1545229).
+            1. Send broadcast traffic from one compute node.
+            2. Other compute in same subnet should receive that traffic.
+            3. Receiving compute should treat this traffic as underlay. 
+            4. Compute should not replicate the packet and send the copy back.  
+        Pass criteria: Step 3-4 should pass
+        Maintainer : chhandak@juniper.net
+        '''
+        if (len(self.inputs.compute_ips) < 2):
+             raise self.skipTest(
+                "Skipping Test. At least 2 compute node required to run the test")
+        result = True
+
+        # Find ignore brocast exiting value 
+        ignore_broadcasts={}
+        cmd='cat /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts'
+        for item in self.inputs.compute_ips:
+            ignore_broadcasts[item]=self.inputs.run_cmd_on_server(
+                item, cmd,
+                self.inputs.host_data[item]['username'],
+                self.inputs.host_data[item]['password'])
+
+        # Set ignore brocast to false 
+        cmd='echo "0" > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts'
+        for item in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(
+                item, cmd,
+                self.inputs.host_data[item]['username'],
+                self.inputs.host_data[item]['password'])
+
+        # Find the Brocast address from first compute
+        cmd='ifconfig | grep %s' %(self.inputs.host_data[item]['host_control_ip'])
+        output=self.inputs.run_cmd_on_server(
+                item, cmd,
+                self.inputs.host_data[item]['username'],
+                self.inputs.host_data[item]['password'])
+        try:
+            broadcast_address=output.split(" ")[3].split(":")[1] #Handling for ubuntu
+        except Exception as e:
+            broadcast_address = output.split(" ")[-1] #Handling for centos
+
+        # Start tcpdump on receiving compute
+        inspect_h = self.agent_inspect[self.inputs.compute_ips[1]]
+        comp_intf = inspect_h.get_vna_interface_by_type('eth')
+        if len(comp_intf) >= 1:
+            comp_intf = comp_intf[0]
+        self.logger.info('Agent interface name: %s' % comp_intf)
+        compute_ip = self.inputs.compute_ips[1]
+        compute_user = self.inputs.host_data[self.inputs.compute_ips[1]]['username']
+        compute_password = self.inputs.host_data[self.inputs.compute_ips[1]]['password']
+        filters = "host %s" %(broadcast_address)
+
+        (session, pcap) = start_tcpdump_for_intf(compute_ip, compute_user,
+            compute_password, comp_intf, filters, self.logger)
+
+        sleep(5)
+
+        # Ping broadcast address
+        self.logger.info(
+            'Pinging broacast address %s from compute %s' %(broadcast_address,\
+                                     self.inputs.host_data[self.inputs.compute_ips[0]]['host_control_ip']))
+        packet_count = 10
+        cmd='ping -c %s -b %s' %(packet_count, broadcast_address)
+        output=self.inputs.run_cmd_on_server(
+                self.inputs.compute_ips[0], cmd,
+                self.inputs.host_data[item]['username'],
+                self.inputs.host_data[item]['password'],
+                container='agent')
+        sleep(5)
+        
+        # Stop tcpdump
+        stop_tcpdump_for_intf(session, pcap, self.logger)
+
+        # Set back the ignore_broadcasts to original value
+        for item in self.inputs.compute_ips:
+            cmd='echo "%s" > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts' %(ignore_broadcasts[item])
+            self.inputs.run_cmd_on_server(
+                item, cmd,
+                self.inputs.host_data[item]['username'],
+                self.inputs.host_data[item]['password'])
+
+        # Analyze pcap
+        assert verify_tcpdump_count(self, session, pcap, exp_count=packet_count), "There should only be %s\
+                                     packet from source %s on compute %s" %(packet_count, broadcast_address, compute_ip)
+        self.logger.info(
+            'Packet count matched: Compute %s has receive only %s packet from source IP %s.\
+                                      No duplicate packet seen' %(compute_ip, packet_count, broadcast_address))
+        return result 
+
+    # end test_underlay_brodcast_traffic_handling 
+
 # end TestBasicVMVN0
+
+class TestMetadataSSL(BaseVnVmTest):
+
+    @classmethod
+    def setUpClass(cls):
+        super(TestMetadataSSL, cls).setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super(TestMetadataSSL, cls).tearDownClass()
+
+    def restore_cert_key_agent(self):
+        cmd='cp /etc/contrail/ssl/certs/server.pem.bkup /etc/contrail/ssl/certs/server.pem;\
+             cp /etc/contrail/ssl/private/server-privkey.pem.bkup /etc/contrail/ssl/private/server-privkey.pem'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+    # end restore_cert_key_agent
+
+    def restore_cert_key_nova(self):
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/ssl/private/novakey.pem.bkup /etc/nova/ssl/private/novakey.pem;\
+                 cp /etc/nova/ssl/certs/nova.pem.bkup /etc/nova/ssl/certs/nova.pem'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/ssl/private/novakey.pem.bkup /etc/nova/ssl/private/novakey.pem;\
+                 docker exec -it nova-api cp /etc/nova/ssl/certs/nova.pem.bkup /etc/nova/ssl/certs/nova.pem'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+    # end restore_cert_key_nova
+
+    def restore_conf(self):
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf.bkup /etc/nova/nova.conf; service nova-api restart'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf.bkup /etc/nova/nova.conf;\
+                 docker exec -it nova-api service nova-api restart'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf.bkup\
+             /etc/contrail/contrail-vrouter-agent.conf;\
+             service contrail-vrouter-agent restart'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+    # end restore_conf
+
+    def metadata_service_test(self):
+        '''
+        Description: Test to validate metadata service on VM creation.
+
+               1.Verify from global-vrouter-config if metadata configures or not - fails otherwise
+               2.Create a shell script which writes  'hello world ' in a file in /tmp and save the script on the nova api node
+               3.Create a vm with userdata pointing to that script - script should get executed during vm boot up
+               4.Go to the vm and verify if the file with 'hello world ' written saved in /tmp of the vm - fails otherwise
+            Maintainer: sandipd@juniper.net
+        '''
+
+        gvrouter_cfg_obj = self.api_s_inspect.get_global_vrouter_config()
+        ln_svc = gvrouter_cfg_obj.get_link_local_service()
+        if ln_svc:
+            self.logger.info(
+                "Metadata configured in global_vrouter_config as %s" %
+                (str(ln_svc)))
+        else:
+            self.logger.warn(
+                "Metadata NOT configured in global_vrouter_config")
+            result = False
+            assert result
+            return True
+
+        text = """#!/bin/sh
+echo "Hello World.  The time is now $(date -R)!" | tee /tmp/output.txt
+               """
+        try:
+            with open("/tmp/metadata_script.txt", "w") as f:
+                f.write(text)
+        except Exception as e:
+            self.logger.exception(
+                "Got exception while creating /tmp/metadata_script.txt as %s" % (e))
+
+        img_name = self.inputs.get_ci_image() or 'ubuntu-traffic'
+        vn_name = get_random_name('vn2_metadata')
+        vm1_name = get_random_name('vm_in_vn2_metadata')
+        vn_fixture = self.create_vn(vn_name=vn_name, vn_subnets = ['10.1.1.0/24'])#, af='v4')
+        vm1_fixture = self.create_vm(vn_fixture=vn_fixture, vm_name=vm1_name,
+                                     image_name=img_name,
+                                     userdata='/tmp/metadata_script.txt')
+        assert vm1_fixture.verify_on_setup()
+        assert vm1_fixture.wait_till_vm_is_up()
+
+        cmd = 'ls /tmp/'
+        result = False
+        for i in range(3):
+            self.logger.debug("Retry %s" % (i))
+            ret = vm1_fixture.run_cmd_on_vm(cmds=[cmd])
+            self.logger.debug("ret : %s" % (ret))
+            for elem in ret.values():
+                if 'output.txt' in elem:
+                    result = True
+                    break
+            if result:
+                break
+            time.sleep(2)
+        if not result:
+            self.logger.warn(
+                "metadata_script.txt did not get executed in the vm")
+            self.logger.debug('%s' %vm1_fixture.get_console_output())
+        else:
+            self.logger.debug("Printing the output.txt :")
+            cmd = 'cat /tmp/output.txt'
+            ret = vm1_fixture.run_cmd_on_vm(cmds=[cmd])
+            self.logger.info("%s" % (ret.values()))
+            for elem in ret.values():
+                if 'Hello World' in elem:
+                    result = True
+                else:
+                    self.logger.warn(
+                        "metadata_script.txt did not get executed in the vm...output.txt does not contain proper output")
+                    result = False
+        assert result
+        return True
+    #end metadata_service_test 
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_ssl_service_without_ca_cert(self):
+        '''
+        Description: Test to validate metadata ssl service on VM creation without ca cert.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='openstack-config --del /etc/nova/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl ca_file;\
+                 service nova-api restart'
+        else:
+            cmd='openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl ca_file;\
+                 docker restart nova-api'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without ca cert.')
+            result=True
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without ca cert.')
+            result=False
+        return result
+    # end test_metadata_ssl_service_without_ca_cert
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_failure_with_ssl_disabled_on_nova(self):
+        '''
+        Description: Test to validate metadata ssl service failure on VM creation without
+                     ssl encryption configuration on nova side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='openstack-config --del /etc/nova/nova.conf DEFAULT enabled_ssl_apis;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT nova_metadata_protocol;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT nova_metadata_insecure;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_cert_file;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_key_file;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl cert_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl key_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl ca_file;\
+                 service nova-api restart'
+        else:
+            cmd='openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT enabled_ssl_apis;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT nova_metadata_protocol;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT nova_metadata_insecure;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_cert_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_key_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl cert_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl key_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl ca_file;\
+                 docker restart nova-api'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without any ssl config in nova.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without any ssl config in nova.')
+            result=True
+        return result
+    # end test_metadata_failure_with_ssl_disabled_on_nova
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_failure_without_cert_key_in_nova(self):
+        '''
+        Description: Test to validate metadata ssl service failure on VM creation without
+                     cert and key file configuration on nova side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='openstack-config --del /etc/nova/nova.conf DEFAULT ssl_cert_file;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_key_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl cert_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl key_file;\
+                 service nova-api restart'
+        else:
+            cmd='openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_cert_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_key_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl cert_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl key_file;\
+                 docker restart nova-api'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed with wrong cert file content in nova.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed with wrong cert file content in nova.')
+            result=True
+        return result
+    # end test_metadata_failure_without_cert_key_in_nova
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_failure_with_wrong_cert_in_nova(self):
+        '''
+        Description: Test to validate metadata ssl service failure on VM creation with
+                     wrong cert file contents on nova side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up cert key files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/ssl/private/novakey.pem /etc/nova/ssl/private/novakey.pem.bkup;\
+                 cp /etc/nova/ssl/certs/nova.pem /etc/nova/ssl/certs/nova.pem.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/ssl/private/novakey.pem /etc/nova/ssl/private/novakey.pem.bkup;\
+                 docker exec -it nova-api cp /etc/nova/ssl/certs/nova.pem /etc/nova/ssl/certs/nova.pem.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_cert_key_nova)
+
+        #Change ciert file
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd="sed -i '8i this ia a garbage value inserted in line 8' /etc/nova/ssl/private/novakey.pem"
+        else:
+            cmd="sed -i '8i this ia a garbage value inserted in line 8' /etc/nova/ssl/private/novakey.pem"
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed with wrong key file content in nova.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed with wrong key file content in nova.')
+            result=True
+        return result
+    # end test_metadata_failure_with_wrong_cert_in_nova
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_failure_with_wrong_key_in_nova(self):
+        '''
+        Description: Test to validate metadata ssl service failure on VM creation with
+                     wrong key file contents on nova side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up cert key files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/ssl/private/novakey.pem /etc/nova/ssl/private/novakey.pem.bkup;\
+                 cp /etc/nova/ssl/certs/nova.pem /etc/nova/ssl/certs/nova.pem.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/ssl/private/novakey.pem /etc/nova/ssl/private/novakey.pem.bkup;\
+                 docker exec -it nova-api cp /etc/nova/ssl/certs/nova.pem /etc/nova/ssl/certs/nova.pem.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_cert_key_nova)
+
+        #Change ciert file
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd="sed -i '8i this ia a garbage value inserted in line 8' /etc/nova/ssl/private/novakey.pem"
+        else:
+            cmd="sed -i '8i this ia a garbage value inserted in line 8' /etc/nova/ssl/private/novakey.pem"
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without any cert key file config in nova.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without any cert key config in nova.')
+            result=True
+        return result
+    # end test_metadata_failure_with_wrong_key_in_nova
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_with_ssl_disabled(self):
+        '''
+        Description: Test to validate metadata service works with ssl configs
+                     disabled on both nova and agent side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        cmd='openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_use_ssl;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metdata_client_cert_type;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_client_cert;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_client_key;\
+             service contrail-vrouter-agent restart'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='openstack-config --del /etc/nova/nova.conf DEFAULT enabled_ssl_apis;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT nova_metadata_protocol;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT nova_metadata_insecure;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_cert_file;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_key_file;\
+                 openstack-config --del /etc/nova/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl cert_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl key_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl ca_file;\
+                 service nova-api restart'
+        else:
+            cmd='openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT enabled_ssl_apis;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT nova_metadata_protocol;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT nova_metadata_insecure;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_cert_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_key_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl cert_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl key_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl ca_file;\
+                 docker restart nova-api'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without any ssl encryption.')
+            result=True
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without any ssl encryption.')
+            result=False
+        return result
+    # end test_metadata_with_ssl_disabled
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_with_wrong_cert_in_agent(self):
+        '''
+        Description: Test to validate metadata service fails with wrong cert
+                     contents on agent side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up cert key files.
+        cmd='cp /etc/contrail/ssl/certs/server.pem /etc/contrail/ssl/certs/server.pem.bkup;\
+             cp /etc/contrail/ssl/private/server-privkey.pem /etc/contrail/ssl/private/server-privkey.pem.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_cert_key_agent)
+
+        #Change config
+        cmd="sed -i '8i this ia a garbage value inserted in line 8' /etc/contrail/ssl/certs/server.pem"
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed with wrong cert on agent.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed with wrong cert on agent.')
+            result=True
+        return result
+    # end test_metadata_with_wrong_cert_in_agent
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_with_wrong_key_in_agent(self):
+        '''
+        Description: Test to validate metadata service fails with wrong key
+                     contents on agent side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up cert key files.
+        cmd='cp /etc/contrail/ssl/certs/server.pem /etc/contrail/ssl/certs/server.pem.bkup;\
+             cp /etc/contrail/ssl/private/server-privkey.pem /etc/contrail/ssl/private/server-privkey.pem.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_cert_key_agent)
+
+        #Change config
+        cmd="sed -i '8i this ia a garbage value inserted in line 8' /etc/contrail/ssl/private/server-privkey.pem"
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed with wrong key on agent.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed with wrong key on agent.')
+            result=True
+        return result
+    # end test_metadata_with_wrong_key_in_agent
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_with_ssl_flag_not_set_in_agent(self):
+        '''
+        Description: Test to validate metadata service fails when metadata_use_ssl flag
+                     is not set on the agent side.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        cmd='openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_use_ssl;\
+             service contrail-vrouter-agent restart'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without ssl flag set on agent.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without ssl flag set on agent.')
+            result=True
+        return result
+    # end test_metadata_with_ssl_flag_not_set_in_agent
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_with_ssl_disabled_only_on_agent(self):
+        '''
+        Description: Test to validate metadata service fails when agent sends insecure
+                     request to ssl encrypted nova/metadata service.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        cmd='openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_use_ssl;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metdata_client_cert_type;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_client_cert;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_client_key;\
+             service contrail-vrouter-agent restart'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without any ssl encryption on agent side.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without any ssl encryption on agent side.')
+            result=True
+        return result
+    # end test_metadata_with_ssl_disabled_only_on_agent
+
+    @preposttest_wrapper
+    @skip_because(orchestrator = 'vcenter', metadata_ssl = 'False')
+    def test_metadata_no_ca_cert(self):
+        '''
+        Description: Test to validate metadata service fails when agent sends insecure
+                     request to ssl encrypted nova/metadata service. Here nova uses
+                     cert key files for encryption and no ca-cert.
+            Maintainer: ritam@juniper.net
+        '''
+
+        #Back up conf files.
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        else:
+            cmd='docker exec -it nova-api cp /etc/nova/nova.conf /etc/nova/nova.conf.bkup'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        cmd='cp /etc/contrail/contrail-vrouter-agent.conf /etc/contrail/contrail-vrouter-agent.conf.bkup'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        #Add cleanup routine.
+        self.addCleanup(self.restore_conf)
+
+        #Change config
+        cmd='openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_use_ssl;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metdata_client_cert_type;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_client_cert;\
+             openstack-config --del /etc/contrail/contrail-vrouter-agent.conf METADATA metadata_client_key;\
+             service contrail-vrouter-agent restart'
+        for compute_node in self.inputs.compute_ips:
+            self.inputs.run_cmd_on_server(compute_node, cmd)
+
+        if self.inputs.get_build_sku() in ['mitaka', 'newton']:
+            cmd='openstack-config --del /etc/nova/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/nova/nova.conf ssl ca_file;\
+                 service nova-api restart'
+        else:
+            cmd='openstack-config --del /etc/kolla/nova-api/nova.conf DEFAULT ssl_ca_file;\
+                 openstack-config --del /etc/kolla/nova-api/nova.conf ssl ca_file;\
+                 docker restart nova-api'
+        for openstack_node in self.inputs.openstack_ips:
+            self.inputs.run_cmd_on_server(openstack_node, cmd)
+
+        #Validate metadata ssl service.
+        try:
+            self.metadata_service_test()
+            self.logger.info('Metadata ssl test passed without any ssl encryption on agent side and no ca-cert on nova.')
+            result=False
+        except Exception as e:
+            self.logger.error('Metadata ssl test failed without any ssl encryption on agent side and no ca-cert on nova.')
+            result=True
+        return result
+    # end test_metadata_no_ca_cert
+
+# end TestMetadataSSL

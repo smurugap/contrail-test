@@ -1,6 +1,5 @@
 from common.openstack_libs import ks_client as ksclient
 from vnc_api.vnc_api import *
-from vnc_api import common
 import uuid
 import argparse
 
@@ -97,7 +96,7 @@ class TestMultitenancy(BaseMultitenancyTest):
         time.sleep(4)
         self.addCleanup(self.key_stone_clients.delete_tenant_list, [proj_name])
         project = self.vnc_lib.project_read(id=project_uuid_vnc_api_format)
-        project_fq_name = project.get_fq_name()
+        project_name = project.get_fq_name()[1]
         self.logger.info('Created Project  %s ' %
                          (str(project.get_fq_name())))
 
@@ -381,7 +380,7 @@ class TestMultitenancy(BaseMultitenancyTest):
         time.sleep(4)
         self.addCleanup(self.key_stone_clients.delete_tenant_list, [proj_name])
         project = self.vnc_lib.project_read(id=project_uuid_vnc_api_format)
-        project_fq_name = project.get_fq_name()
+        project_name = project.get_fq_name()[1]
 
         # Create user test/test123 and add as admin in projectF
         self.logger.info("Creating user test/test123 in projF as Admin")
@@ -458,10 +457,9 @@ class TestMultitenancy(BaseMultitenancyTest):
 
         self.logger.info("Creating vn in %s as user %s" % (proj_name, user))
         try:
-            test_proj_inputs1 = self.useFixture(
-                ContrailTestInit(
-                    self.ini_file, stack_user=user, stack_password=password,
-                    project_fq_name=project_fq_name , logger = self.logger))
+            test_proj_inputs1 = ContrailTestInit(
+                    self.input_file, stack_user=user, stack_password=password,
+                    stack_tenant=project_name , logger = self.logger)
             test_proj_connections1 = ContrailConnections(test_proj_inputs1 , logger = self.logger)
             vn1_fixture = self.useFixture(
                 VNFixture(
@@ -475,10 +473,9 @@ class TestMultitenancy(BaseMultitenancyTest):
 
         self.logger.info("Creating vn in %s as user %s" % (proj_name, user1))
         try:
-            test1_proj_inputs1 = self.useFixture(
-                ContrailTestInit(
-                    self.ini_file, stack_user=user1, stack_password=password1,
-                    project_fq_name=project_fq_name,logger = self.logger))
+            test1_proj_inputs1 = ContrailTestInit(
+                    self.input_file, stack_user=user1, stack_password=password1,
+                    stack_tenant=project_name,logger = self.logger)
             test1_proj_connections1 = ContrailConnections(test1_proj_inputs1,logger = self.logger)
             vn2_fixture = self.useFixture(
                 VNFixture(
@@ -665,7 +662,7 @@ class TestMultitenancy(BaseMultitenancyTest):
         time.sleep(4)
         self.addCleanup(self.key_stone_clients.delete_tenant_list, [proj_name])
         project = self.vnc_lib.project_read(id=project_uuid_vnc_api_format)
-        project_fq_name = project.get_fq_name()
+        project_name = project.get_fq_name()[1]
         self.logger.info("Creating user test/test123 in projF as Admin")
         user = util.get_random_name('test')
         password = 'test123'
@@ -726,16 +723,15 @@ class TestMultitenancy(BaseMultitenancyTest):
         self.logger.info("Test policy linking with vn...")
         self.logger.info("Creating vn in %s as user %s" % (proj_name, user))
         try:
-            test_proj_inputs1 = self.useFixture(
-                ContrailTestInit(
-                    self.ini_file, stack_user=user, stack_password=password,
-                    project_fq_name=project_fq_name , logger = self.logger))
+            test_proj_inputs1 = ContrailTestInit(
+                    self.input_file, stack_user=user, stack_password=password,
+                    stack_tenant=project_name , logger = self.logger)
             test_proj_connections1 = ContrailConnections(test_proj_inputs1 , logger = self.logger)
 
             vn_obj = self.useFixture(
                 VNFixture(
                     project_name=proj_name, connections=test_proj_connections1,
-                    vn_name='vn211', option='api', inputs=test_proj_inputs1, subnets=['200.100.100.0/24', '200.100.101.0/24']))
+                    vn_name='vn211', option='contrail', inputs=test_proj_inputs1, subnets=['200.100.100.0/24', '200.100.101.0/24']))
         except Exception as e:
             self.logger.exception('Got exception as %s' % (e))
             testfail += 1
@@ -890,7 +886,7 @@ class TestMultitenancy(BaseMultitenancyTest):
         time.sleep(4)
         self.addCleanup(self.key_stone_clients.delete_tenant_list, [proj_name])
         project = self.vnc_lib.project_read(id=project_uuid_vnc_api_format)
-        project_fq_name = project.get_fq_name()
+        project_name = project.get_fq_name()[1]
         self.logger.info("Creating user test/test123 in projF as Admin")
         user = 'test'
         password = 'test123'
@@ -931,16 +927,15 @@ class TestMultitenancy(BaseMultitenancyTest):
 
         self.logger.info("Creating vn in %s as user %s" % (proj_name, user))
         try:
-            test_proj_inputs1 = self.useFixture(
-                ContrailTestInit(
-                    self.ini_file, stack_user=user, stack_password=password,
-                    project_fq_name=project_fq_name , logger = self.logger))
+            test_proj_inputs1 = ContrailTestInit(
+                    self.input_file, stack_user=user, stack_password=password,
+                    stack_tenant=project_name , logger = self.logger)
             test_proj_connections1 = ContrailConnections(test_proj_inputs1 , logger = self.logger)
 
             vn_obj = self.useFixture(
                 VNFixture(
                     project_name=proj_name, connections=test_proj_connections1,
-                    vn_name='vn211', option='api', inputs=test_proj_inputs1, subnets=['200.100.100.0/24', '200.100.101.0/24']))
+                    vn_name='vn211', option='contrail', inputs=test_proj_inputs1, subnets=['200.100.100.0/24', '200.100.101.0/24']))
         except Exception as e:
             self.logger.exception('Got exception as %s' % (e))
             testfail += 1

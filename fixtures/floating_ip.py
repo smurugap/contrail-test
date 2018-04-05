@@ -1,6 +1,6 @@
 import fixtures
 from vnc_api.vnc_api import *
-from vnc_api.common import exceptions as vncExceptions
+from cfgm_common import exceptions as vncExceptions
 from project_test import *
 import time
 from contrail_fixtures import *
@@ -16,11 +16,13 @@ except ImportError:
 
 class FloatingIPFixture(fixtures.Fixture):
 
-    def __init__(self, inputs, pool_name, vn_id, connections, vn_name=None, project_name=None, option=None):
+    def __init__(self, inputs=None, pool_name=None, vn_id=None,
+                 connections=None, vn_name=None, project_name=None,
+                 option=None, uuid=None):
         self.connections = connections
-        self.inputs = inputs
+        self.inputs = inputs or connections.inputs
         if not project_name:
-            project_name = self.inputs.stack_tenant
+            project_name = self.inputs.project_name
         self.api_s_inspect = self.connections.api_server_inspect
         self.orch = self.connections.orch
         self.quantum_h = self.connections.quantum_h
@@ -30,28 +32,45 @@ class FloatingIPFixture(fixtures.Fixture):
         self.analytics_obj = self.connections.analytics_obj
 
         self.project_name = project_name
+        self.domain_name = self.connections.domain_name
         self.vn_id = vn_id
+        self.vn_name = vn_name
         self.logger = self.inputs.logger
         self.already_present = False
         self.verify_is_run = False
         self.fip = {}
         self.option = option
+        self.fip_pool_id = uuid
         if self.option == 'neutron':
-            self.pool_name = 'floating-ip-pool'
-        else:
-            self.pool_name = pool_name
+            pool_name = 'floating-ip-pool'
+        self.pool_name = pool_name or 'floating-ip-pool'
         if self.inputs.verify_thru_gui():
             self.browser = self.connections.browser
             self.browser_openstack = self.connections.browser_openstack
             self.webui = WebuiTest(self.connections, self.inputs)
-            self.vn_name = vn_name
     # end __init__
+
+    def read(self):
+        if self.fip_pool_id:
+            self.fip_pool_obj = self.vnc_lib_h.floating_ip_pool_read(id=self.fip_pool_id)
+            self.fq_name = self.get_fq_name()
+            self.pool_name = self.fq_name[-1]
+            self.vn_fq_name = self.fq_name[:-1]
+            self.vn_id = self.vnc_lib_h.fq_name_to_id('virtual-network', self.vn_fq_name)
+            self.pub_vn_name = self.vn_fq_name[-1]
+            self.logger.info('Fetched FIP pool %s(%s)' %(self.fq_name, self.fip_pool_id))
+            self.already_present = True
+    # end read
 
     def setUp(self):
         super(FloatingIPFixture, self).setUp()
-        self.project_fixture = self.useFixture(ProjectFixture(
-            project_name=self.project_name, vnc_lib_h=self.vnc_lib_h, connections=self.connections))
-        self.project_obj = self.project_fixture.project_obj
+        self.create()
+    # end setUp
+
+    def create(self):
+        if self.fip_pool_id:
+            return self.read()
+        self.project_obj = self.get_project_obj()
         if not self.is_fip_pool_present(self.pool_name):
             if self.inputs.is_gui_based_config():
                 self.create_floatingip_pool_webui(self.pool_name, self.vn_name)
@@ -61,16 +80,20 @@ class FloatingIPFixture(fixtures.Fixture):
             self.logger.debug('FIP pool %s already present, not creating it' %
                               (self.pool_name))
             self.already_present = True
-    # end setUp
+
+    def get_project_obj(self):
+        if not getattr(self, 'project_obj', None):
+            self.project_obj = self.vnc_lib_h.project_read(fq_name=[self.domain_name , self.project_name])
+        return self.project_obj
 
     def create_floatingip_pool_webui(self, pool_name, vn_name):
         self.webui.create_floatingip_pool(self, pool_name, vn_name)
     # end create_floatingip_pool_webui
 
-    def create_and_assoc_fip_webui(self, fip_pool_vn_id, vm_id, vm_name, project=None):
-        self.webui.create_and_assoc_fip(
-            self, fip_pool_vn_id, vm_id, vm_name, project=None)
-    # end create_and_assoc_fip_webui
+    def alloc_and_assoc_fip_webui(self, fip_pool_vn_id, vm_id, vm_ip, vm_name, assoc=True, project=None):
+        self.webui.alloc_and_assoc_fip(
+            self, fip_pool_vn_id, vm_id, vm_ip, vm_name, assoc, project=None)
+    # end alloc_and_assoc_fip_webui
 
     def verify_on_setup(self):
         result = True
@@ -79,11 +102,19 @@ class FloatingIPFixture(fixtures.Fixture):
             self.logger.error(
                 ' Verification of FIP pool %s in API Server failed' %
                 (self.pool_name))
+        else:
+            self.logger.info(
+                'Verification for FIP pool %s in API Server passed' % (
+                self.pool_name))
         if not self.verify_fip_pool_in_control_node():
             result &= False
             self.logger.error(
                 ' Verification of FIP pool %s in Control-node failed' %
                 (self.pool_name))
+        else:
+            self.logger.info(
+                'Verification for FIP pool %s in Control-node passed' % (
+                self.pool_name))
         self.verify_is_run = True
         return result
     # end verify_on_setup
@@ -100,6 +131,7 @@ class FloatingIPFixture(fixtures.Fixture):
             self.fip_pool_obj)
 
         # allow current project to pick from pool
+        self.project_obj = self.get_project_obj()
         self.project_obj.add_floating_ip_pool(self.fip_pool_obj)
         self.vnc_lib_h.project_update(self.project_obj)
     # end create_floatingip_pool
@@ -131,6 +163,15 @@ class FloatingIPFixture(fixtures.Fixture):
         return True
     # end get_fip_pool_if_present
 
+    def get_uuid(self):
+        return self.fip_pool_id
+
+    def get_fq_name(self):
+        return self.fip_pool_obj.get_fq_name()
+
+    def get_vn_id(self):
+        return self.vn_id
+
     @retry(delay=2, tries=15)
     def verify_fip_pool_in_api_server(self):
         result = True
@@ -138,18 +179,18 @@ class FloatingIPFixture(fixtures.Fixture):
         self.pub_vn_name = self.pub_vn_obj.name
         self.cs_fip_pool_obj = self.api_s_inspect.get_cs_alloc_fip_pool(
             fip_pool_name=self.pool_name,
-            vn_name=self.pub_vn_obj.name, project=self.project_name, refresh=True)
+            vn_name=self.pub_vn_obj.name, domain = self.domain_name, project=self.project_name, refresh=True)
         if not self.cs_fip_pool_obj:
-            self.logger.warn("Floating IP pool %s not found in API Server " %
+            self.logger.debug("Floating IP pool %s not found in API Server " %
                              (self.pool_name))
             result = result and False
             return result
         self.cs_fip_pool_id = self.cs_fip_pool_obj['floating-ip-pool']['uuid']
         self.cs_fvn_obj = self.api_s_inspect.get_cs_vn(
-            vn=self.pub_vn_obj.name, refresh=True, project=self.project_name)
+            vn=self.pub_vn_obj.name, refresh=True, domain = self.domain_name, project=self.project_name)
         if result:
-            self.logger.info(
-                'FIP Pool verificatioin in API Server passed for Pool %s' %
+            self.logger.debug(
+                'FIP Pool %s found in API Server' %
                 (self.pool_name))
         return result
     # end verify_fip_pool_in_api_server
@@ -161,9 +202,10 @@ class FloatingIPFixture(fixtures.Fixture):
         self.pub_vn_name = self.pub_vn_obj.name
         for cn in self.inputs.bgp_ips:
             cn_object = self.cn_inspect[cn].get_cn_config_fip_pool(
-                vn_name=self.pub_vn_name, fip_pool_name=self.pool_name, project=self.project_name)
+                vn_name=self.pub_vn_name, fip_pool_name=self.pool_name, 
+                domain = self.domain_name, project=self.project_name)
             if not cn_object:
-                self.logger.warn(
+                self.logger.debug(
                     "Control-node ifmap object for FIP pool %s , VN %s not found" %
                     (self.pool_name, self.pub_vn_name))
                 result = result and False
@@ -177,6 +219,7 @@ class FloatingIPFixture(fixtures.Fixture):
     def delete_floatingip_pool(self):
         fip_pool_id = self.fip_pool_id
         fip_pool_obj = self.vnc_lib_h.floating_ip_pool_read(id=fip_pool_id)
+        self.project_obj = self.get_project_obj()
         self.project_obj.del_floating_ip_pool(fip_pool_obj)
         self.vnc_lib_h.project_update(self.project_obj)
         self.vnc_lib_h.floating_ip_pool_delete(id=fip_pool_id)
@@ -187,7 +230,8 @@ class FloatingIPFixture(fixtures.Fixture):
         result = True
         for cn in self.inputs.bgp_ips:
             cn_object = self.cn_inspect[cn].get_cn_config_fip_pool(
-                vn_name=self.pub_vn_name, fip_pool_name=self.pool_name, project=self.project_name)
+                vn_name=self.pub_vn_name, fip_pool_name=self.pool_name,
+                domain = self.domain_name, project=self.project_name)
             if cn_object:
                 self.logger.warn(
                     "Control-node ifmap object for FIP pool %s , VN %s is found!" %
@@ -199,15 +243,20 @@ class FloatingIPFixture(fixtures.Fixture):
         return result
     # end verify_fip_pool_not_in_control_node
 
-    def create_and_assoc_fip(self, fip_pool_vn_id, vm_id, project=None):
+    def get_associated_fips(self):
+        fips_dict = self.fip_pool_obj.get_floating_ips()
+        return [fip['uuid'] for fip in fips_dict]
+
+    def create_and_assoc_fip(self, fip_pool_vn_id=None, vm_id=None, project=None, port_id=None):
         ''' Create and associate a floating IP to a VM with vm_id from VN fip_pool_vn_id
 
         Recommended to call verify_fip() after this method to make sure that the floating IP is correctly installed
         '''
+        fip_pool_vn_id = fip_pool_vn_id or self.vn_id
         try:
             fip_obj = self.create_floatingip(fip_pool_vn_id, project)
             self.logger.debug('Associating FIP %s to %s' %(fip_obj[0], vm_id))
-            self.assoc_floatingip(fip_obj[1], vm_id)
+            self.assoc_floatingip(fip_obj[1], vm_id, port_id)
             return fip_obj[1]
         except:
             self.logger.error('Failed to create or asscociate FIP. Error: %s' %
@@ -218,54 +267,87 @@ class FloatingIPFixture(fixtures.Fixture):
     def verify_fip(self, fip_id, vm_fixture, fip_vn_fixture):
         result = True
         fip = self.orch.get_floating_ip(fip_id)
+        fip_str = '%s(%s)' % (fip_id, fip)
         self.fip[fip_id] = fip
         if not self.verify_fip_in_control_node(fip, vm_fixture, fip_vn_fixture):
             result &= False
+            self.logger.error('FIP ID %s validation in Control node failed' %(
+                fip_str))
+        else:
+            self.logger.info('FIP ID %s validation in Control node passed' %(
+                fip_str))
+
         if not self.verify_fip_in_agent(fip, vm_fixture, fip_vn_fixture):
             result &= False
+            self.logger.error('FIP ID %s validation in agents failed' % (
+                fip_str))
+        else:
+            self.logger.info('FIP ID %s validation in agents passed' % (
+                fip_str))
         if not self.verify_fip_in_api_server(fip_id):
             result &= False
+            self.logger.error('FIP ID %s validation in API Server failed' % (
+                fip_str))
+        else:
+            self.logger.info('FIP ID %s validation in API Server passed' % (
+                fip_str))
         return result
     # end verify_fip
 
-    def verify_no_fip(self, fip_id, fip_vn_fixture):
+    def verify_no_fip(self, fip_id, fip_vn_fixture, fip=None):
         result = True
-        fip = self.fip[fip_id]
+        fip = fip or self.fip[fip_id]
+        fip_str = '%s(%s)' % (fip_id, fip)
         if not self.verify_fip_not_in_control_node(fip, fip_vn_fixture):
             self.logger.error(
-                'FIP %s absense verification failed on one or more control-nodes' % (fip))
+                'FIP %s absense verification failed on one or more '
+                'control-nodes' % (fip_str))
             result &= False
+        else:
+            self.logger.info('Validated that FIP %s is removed in Control '
+                ' node ' % (fip_str))
         if not self.verify_fip_not_in_agent(fip, fip_vn_fixture):
             self.logger.error(
-                'FIP %s absense verification failed on one or more agents ' % (fip))
+                'FIP %s absense verification failed on one or more agents ' % (
+                fip_str))
             result &= False
-            self.logger.error(
-                'FIP %s absense verification failed on API server ' % (fip))
+        else:
+            self.logger.info('Validated that FIP %s is removed in agent '
+                ' node ' % (fip_str))
         if not self.verify_fip_not_in_api_server(fip_id):
             result &= False
+            self.logger.error(
+                'FIP %s absense verification failed on API server ' % (fip_str))
+        else:
+            self.logger.info('Validated that FIP %s is removed in API Server ' % (
+                fip_str))
         return result
     # end verify_no_fip
 
     @retry(delay=5, tries=3)
     def verify_fip_in_control_node(self, fip, vm_fixture, fip_vn_fixture):
-        self.ctrl_nodes= vm_fixture.get_ctrl_nodes_in_rt_group()
+        if self.inputs.vcenter_gw_setup:
+            return True #To do:Need to fix the control node verification
+                        #for vcenter gateway case. 
+        self.ctrl_nodes= vm_fixture.get_ctrl_nodes_in_rt_group(fip_vn_fixture.vn_fq_name)
+        agent_label = vm_fixture.get_agent_label()
         for cn in self.ctrl_nodes:
-            ri_name = fip_vn_fixture.ri_name
+            ri_name = fip_vn_fixture.get_vrf_name()
             cn_routes = self.cn_inspect[cn].get_cn_route_table_entry(
-                        ri_name=fip_vn_fixture.ri_name, prefix=fip)
+                        ri_name=ri_name, prefix=fip)
             if not cn_routes:
                 self.logger.warn('No route found for %s in Control-node %s ' %
                                  (fip, cn))
                 return False
-            if cn_routes[0]['next_hop'] != vm_fixture.vm_node_data_ip:
+            if cn_routes[0]['next_hop'] != vm_fixture.get_compute_host():
                 self.logger.warn(
                     'Expected next-hop for %s in Control-node %s : %s, Found : %s' %
-                    (fip, cn, vm_node_data_ip, cn_routes[0]['next_hop']))
+                    (fip, cn, vm_fixture.vm_node_data_ip, cn_routes[0]['next_hop']))
                 return False
-            if cn_routes[0]['label'] not in vm_fixture.agent_label[vm_fixture.vn_fq_name]:
+            if cn_routes[0]['label'] not in agent_label[vm_fixture.vn_fq_name]:
                 self.logger.warn(
                     'Expected label for %s in Control-node %s : %s, Found : %s' %
-                    (fip, cn, vm_fixture.agent_label[vm_fixture.vn_fq_name], cn_routes[0]['label']))
+                    (fip, cn, agent_label[vm_fixture.vn_fq_name], cn_routes[0]['label']))
                 return False
             self.logger.info(' Route for FIP %s is fine on Control-node %s ' %
                              (fip, cn))
@@ -278,29 +360,31 @@ class FloatingIPFixture(fixtures.Fixture):
     @retry(delay=5, tries=3)
     def verify_fip_not_in_control_node(self, fip, fip_vn_fixture):
         for cn in self.inputs.bgp_ips:
-            ri_name = fip_vn_fixture.ri_name
+            ri_name = fip_vn_fixture.get_vrf_name()
             cn_routes = self.cn_inspect[cn].get_cn_route_table_entry(
-                        ri_name=fip_vn_fixture.ri_name, prefix=fip)
+                        ri_name=ri_name, prefix=fip)
             if cn_routes:
-                self.logger.warn(
+                self.logger.debug(
                     ' FIP %s is still found in route table for Control node %s' % (fip, cn))
                 return False
-            self.logger.info(
+            self.logger.debug(
                 'FIP %s is removed from route table for Control node %s' % (fip, cn))
         return True
     # verify_fip_not_in_control_node
 
     @retry(delay=5, tries=3)
     def verify_fip_in_agent(self, fip, vm_fixture, fip_vn_fixture):
+        label = vm_fixture.get_agent_label()
         for compute_ip in self.inputs.compute_ips:
             inspect_h = self.agent_inspect[compute_ip]
-            vn = inspect_h.get_vna_vn(vn_name=fip_vn_fixture.vn_name, project=self.project_name)
+            vn = inspect_h.get_vna_vn(vn_name=fip_vn_fixture.vn_name,
+                                      domain = self.domain_name, project=self.project_name)
             if vn is None:
                 continue
             agent_vrf_objs = inspect_h.get_vna_vrf_objs(
-                vn_name=fip_vn_fixture.vn_name, project=self.project_name)
+                vn_name=fip_vn_fixture.vn_name, domain = self.domain_name, project=self.project_name)
             agent_vrf_obj = self.get_matching_vrf(
-                agent_vrf_objs['vrf_list'], fip_vn_fixture.vrf_name)
+                agent_vrf_objs['vrf_list'], fip_vn_fixture.get_vrf_name())
             agent_vrf_id = agent_vrf_obj['ucindex']
             agent_path = inspect_h.get_vna_active_route(
                          vrf_id=agent_vrf_id, ip=fip)
@@ -315,10 +399,10 @@ class FloatingIPFixture(fixtures.Fixture):
                 self.logger.debug(
                     'Not able to retrieve label value from agent.Retry...')
                 return False
-            if agent_label not in vm_fixture.agent_label[vm_fixture.vn_fq_name]:
-                self.logger.warn(
+            if agent_label not in label[vm_fixture.vn_fq_name]:
+                self.logger.debug(
                     'The route for VM IP %s in Node %s is having incorrect label. Expected : %s, Seen : %s' %
-                    (vm_fixture.vm_ip, compute_ip, vm_fixture.agent_label[vm_fixture.vn_fq_name], agent_label))
+                    (vm_fixture.vm_ip, compute_ip, label[vm_fixture.vn_fq_name], agent_label))
                 return False
 
             self.logger.debug('Route for FIP IP %s is present in agent %s ' %
@@ -367,13 +451,14 @@ class FloatingIPFixture(fixtures.Fixture):
     def verify_fip_not_in_agent(self, fip, fip_vn_fixture):
         for compute_ip in self.inputs.compute_ips:
             inspect_h = self.agent_inspect[compute_ip]
-            vn = inspect_h.get_vna_vn(vn_name=fip_vn_fixture.vn_name, project=self.project_name)
+            vn = inspect_h.get_vna_vn(vn_name=fip_vn_fixture.vn_name,
+                                      domain = self.domain_name, project=self.project_name)
             if vn is None:
                 continue
             agent_vrf_objs = inspect_h.get_vna_vrf_objs(
-                vn_name=fip_vn_fixture.vn_name, project=self.project_name)
+                vn_name=fip_vn_fixture.vn_name, domain = self.domain_name, project=self.project_name)
             agent_vrf_obj = self.get_matching_vrf(
-                agent_vrf_objs['vrf_list'], fip_vn_fixture.vrf_name)
+                agent_vrf_objs['vrf_list'], fip_vn_fixture.get_vrf_name())
             agent_vrf_id = agent_vrf_obj['ucindex']
             if inspect_h.get_vna_active_route(vrf_id=agent_vrf_id, ip=fip):
                 self.logger.warn('Route for FIP %s present in Agent %s' %
@@ -393,11 +478,11 @@ class FloatingIPFixture(fixtures.Fixture):
         '''
         self.disassoc_floatingip(fip_id)
         self.delete_floatingip(fip_id)
-        time.sleep(10)
+#        time.sleep(10)
     # end disassoc_and_delete_fip
 
-    def disassoc_and_delete_fip_webui(self, vm_id):
-        self.webui.disassoc_floatingip(self, vm_id)
+    def disassoc_and_delete_fip_webui(self, vm_id, vm_ip, assoc):
+        self.webui.disassoc_disalloc_fip(self, vm_id, vm_ip, assoc)
     # end disassoc_and_delete_fip_webui
 
     def create_floatingips(self, fip_pool_vn_id, count=1):
@@ -409,7 +494,7 @@ class FloatingIPFixture(fixtures.Fixture):
         for i in range(count):
             fip_resp = self.create_floatingip(fip_pool_vn_id)
             if fip_resp:
-                fip_dicts.append(fip_resp['floatingip'])
+                fip_dicts.append(fip_resp)
         # end for
         return fip_dicts
     # end create_floatingips
@@ -419,7 +504,7 @@ class FloatingIPFixture(fixtures.Fixture):
 
         '''
         if project_obj is None:
-            project_obj = self.project_obj
+            project_obj = self.get_project_obj()
         fip_resp = self.orch.create_floating_ip(pool_vn_id=fip_pool_vn_id,
                      project_obj=project_obj, pool_obj=self.fip_pool_obj)
         self.logger.debug('Created Floating IP : %s' % str(fip_resp))
@@ -433,7 +518,7 @@ class FloatingIPFixture(fixtures.Fixture):
         cs_fip_obj = self.api_s_inspect.get_cs_fip(fip_id, refresh=True)
         if not cs_fip_obj:
             return False
-        self.logger.info('FIP verification passed in API server')
+        self.logger.debug('FIP %s is present in API server' % (fip_id))
         return True
     # end
 
@@ -443,17 +528,18 @@ class FloatingIPFixture(fixtures.Fixture):
         cs_fip_obj = self.api_s_inspect.get_cs_fip(fip_id, refresh=True)
         if cs_fip_obj:
             return False
-        self.logger.info('FIP removal verification passed in API server')
+        self.logger.debug('FIP %s is not present in API server' % (fip_id))
         return True
     # end
 
     def delete_floatingips(self, fip_obj_list):
         ''' Removes floating ips from a pool. Need to pass a floatingIP object-list
 
+            The fip_obj_list will be in  format
+            [ (Floating ip, floating ip UUID),  ..... ]
         '''
-        for i in fip_obj_list:
-            index = fip_obj_list.index(i)
-            self.delete_floatingip(fip_obj_list[index]['id'])
+        for item in fip_obj_list:
+            self.delete_floatingip(item[1])
         # end for
     # end delete_floatingips
 
@@ -462,53 +548,59 @@ class FloatingIPFixture(fixtures.Fixture):
         self.orch.delete_floating_ip(fip_id)
     # end delete_floatingip
 
-    def assoc_floatingip(self, fip_id, vm_id):
-        return self.orch.assoc_floating_ip(fip_id, vm_id)
+    def assoc_floatingip(self, fip_id, vm_id, port_id=None):
+        return self.orch.assoc_floating_ip(fip_id, vm_id, port_id)
     # end assoc_floatingip
 
     def disassoc_floatingip(self, fip_id):
         return self.orch.disassoc_floating_ip(fip_id)
     # end
 
-    def assoc_project(self, fip_fixture, project, domain='default-domain'):
+    def assoc_project(self, project, domain=None):
+        domain = domain or self.domain_name
         result = True
         self.logger.info('Associting Floting IP with project %s' % (project))
 
         # Create the project object
-        project_fq_name = ['default-domain', project]
-        self.new_project_obj = fip_fixture.vnc_lib_h.project_read(
+        project_fq_name = [domain, project]
+        self.new_project_obj = self.vnc_lib_h.project_read(
             fq_name=project_fq_name)
 
         # Associate project with floating IP pool
         result = self.new_project_obj.add_floating_ip_pool(
-            fip_fixture.fip_pool_obj)
-        fip_fixture.vnc_lib_h.project_update(self.new_project_obj)
-        self.new_project_obj = fip_fixture.vnc_lib_h.project_read(
+            self.fip_pool_obj)
+        self.vnc_lib_h.project_update(self.new_project_obj)
+        self.new_project_obj = self.vnc_lib_h.project_read(
             fq_name=project_fq_name)
         return self.new_project_obj
     # end assoc_project
 
-    def deassoc_project(self, fip_fixture, project, domain='default-domain'):
+    def deassoc_project(self, project, domain=None):
+        domain = domain or self.domain_name
         result = True
         self.logger.info('De-associting Floting IP with project %s' %
                          (project))
 
         # Create the project object
-        project_fq_name = ['default-domain', project]
-        self.new_project_obj = fip_fixture.vnc_lib_h.project_read(
+        project_fq_name = [domain, project]
+        self.new_project_obj = self.vnc_lib_h.project_read(
             fq_name=project_fq_name)
 
         # Deassociate project with floating IP pool
         result = self.new_project_obj.del_floating_ip_pool(
-            fip_fixture.fip_pool_obj)
-        fip_fixture.vnc_lib_h.project_update(self.new_project_obj)
-        self.new_project_obj = fip_fixture.vnc_lib_h.project_read(
+            self.fip_pool_obj)
+        self.vnc_lib_h.project_update(self.new_project_obj)
+        self.new_project_obj = self.vnc_lib_h.project_read(
             fq_name=project_fq_name)
         return self.new_project_obj
     # end assoc_project
 
     def cleanUp(self):
         super(FloatingIPFixture, self).cleanUp()
+        self.delete()
+    # end cleanUp
+
+    def delete(self, verify=False):
         do_cleanup = True
         if self.inputs.fixture_cleanup == 'no':
             do_cleanup = False
@@ -523,9 +615,8 @@ class FloatingIPFixture(fixtures.Fixture):
                 self.webui.delete_floatingip_pool(self)
             else:
                 self.delete_floatingip_pool()
-            if self.verify_is_run:
+            if self.verify_is_run or verify:
                 assert self.verify_fip_pool_not_in_control_node()
             else:
                 self.logger.info('Skipping deletion of FIP pool %s' %
                                  (self.pool_name))
-    # end cleanUp
